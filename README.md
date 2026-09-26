@@ -1,36 +1,175 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# 開発促進Discord Bot：MVPまとめ
 
-## Getting Started
+## 1. 概要
 
-First, run the development server:
+開発が続かない学生エンジニア向けに、**開発の宣言・GitHubでの活動確認・Discordでの声かけ**を行うBot。
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+> **宣言する → 仲間に見える → GitHubで自動確認 → ニキが称える／煽る**
+
+操作はDiscord内で完結させ、GitHub連携時のみブラウザを使用する。独立したWebアプリの画面は原則作らない。
+
+**目標は、3人でMVPを完成させ、開発期間中に自分たちで使い、発表で実際の利用結果を示すこと。**
+
+## 2. MVPの前提
+
+開発範囲を絞るため、以下を暫定仕様とする。
+
+| 項目      | MVPでの扱い                             |
+| ------- | ----------------------------------- |
+| チーム     | **1 Discordサーバー＝1チーム**              |
+| 参加者     | GitHub連携を行い、利用を開始した人。サーバー全員を自動登録しない |
+| 対象リポジトリ | **公開リポジトリのみ**                       |
+| 対象ブランチ  | 宣言時に1本指定。未指定ならデフォルトブランチ             |
+| 宣言数     | 1人・1サーバーにつき、進行中は1件まで                |
+| 時刻      | 入力・表示は日本時間。DBにはUTCで保存               |
+| ニキの投稿   | 固定テンプレート。LLMは使わない                   |
+| 自動判定の対象 | 宣言内容の完成ではなく、**条件を満たすコミットの有無**       |
+
+## 3. 利用の流れ
+
+```text
+管理者がBotをサーバーに追加
+    ↓
+通知先チャンネルを設定
+    ↓
+各ユーザーがGitHubアカウントを連携
+    ↓
+「何を・どのリポジトリで・いつまでに」を宣言
+    ↓
+Botが宣言をチャンネルに公開
+    ↓
+期限後、GitHubのコミットを確認
+    ↓
+達成／未達成の結果を保存し、ニキが投稿
+    ↓
+コマンドからチームの状況を確認
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+## 4. MVPで実装する機能
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+コマンド名は仮。
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+| 機能・コマンド                     | 内容                                                      |
+| --------------------------- | ------------------------------------------------------- |
+| **初期設定** `/niki setup`      | 管理権限のある人が通知先チャンネルを指定する                                  |
+| **GitHub連携** `/niki github` | 本人だけに認可リンクを表示し、GitHub OAuthでDiscordユーザーとGitHubユーザーを紐付ける |
+| **宣言** `/niki declare`      | 内容・リポジトリ・ブランチ・期限を入力し、DBへ保存。通知チャンネルにも公開する                |
+| **取消** `/niki cancel`       | 本人が期限前の宣言を取り消す。取消済みの宣言は判定・集計から除外する                      |
+| **状況確認** `/niki status`     | チーム内の進行中の宣言、達成・未達成、メンバー別の達成率・連続達成日数を表示する                |
+| **期限判定** 自動処理               | 5〜10分おきに期限を過ぎた未判定の宣言を取得し、GitHubを確認する                    |
+| **結果通知** 自動処理               | 達成なら称賛、未達成なら煽りのテンプレートを投稿する                              |
 
-## Learn More
+宣言入力にはスラッシュコマンドの引数やModalを使用する。**独自のログイン画面・チーム招待画面・Webhook URL登録画面は作らない。**
 
-To learn more about Next.js, take a look at the following resources:
+### 宣言時の入力項目
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```text
+内容：ログイン画面を実装する
+リポジトリ：owner/repository
+ブランチ：feature/login
+期限：2026-09-28 22:00
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+通知では宣言者をメンションし、内容・対象・期限を表示する。
 
-## Deploy on Vercel
+## 5. 達成判定と集計
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+### 達成条件
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+以下をすべて満たすコミットが、期限後の確認で1件以上取得できたら達成とする。
+
+* 指定リポジトリ・指定ブランチに存在する。
+* 連携したGitHubユーザーがauthorとして紐付いている。
+* 判定に使うコミット日時が、宣言登録時刻から期限までの範囲内にある。
+
+**コミット日時を使う簡易判定であり、期限内にpushされたことの厳密な保証や、宣言した機能の完成確認は行わない。** 判定に使う日時フィールドは実装時に統一する。
+
+### 判定状態
+
+| 状況                   | 扱い               |
+| -------------------- | ---------------- |
+| 期限前                  | 進行中              |
+| 対象コミットがある            | 達成               |
+| 正常に確認でき、対象コミットがない    | 未達成              |
+| GitHub APIの障害・権限不足など | 確認待ち／確認エラーとして再試行 |
+| 本人が取消済み              | 判定対象外            |
+
+**APIエラーを未達成扱いにしない。** 結果の判定とDiscord通知の状態は分けて管理し、通知に失敗した場合は通知だけ再試行する。
+
+期限ぴったりの通知は保証せず、期限後の定期処理で通知する。
+
+### 集計ルール案
+
+**達成率**は「達成件数 ÷ 達成・未達成が確定した件数」。進行中・取消・確認エラーは分母に含めない。
+
+**連続達成日数**は、期限の日本時間の日付を基準に、1件以上達成した日が連続した日数とする。同日に複数達成しても1日分として数え、達成のない日で途切れる。当日がまだ達成していない場合は、前日までの連続記録を表示する。
+
+## 6. 技術スタック
+
+| 分野          | 採用案                                      | 役割                            |
+| ----------- | ---------------------------------------- | ----------------------------- |
+| 言語          | **TypeScript**                           | 全体の実装                         |
+| バックエンド      | **Next.js / Route Handlers**             | Discord受付、GitHub連携、宣言管理、判定API |
+| ホスティング      | **Vercel**                               | Next.jsのデプロイ                  |
+| DB          | **Supabase PostgreSQL**                  | ユーザー・設定・宣言・結果の保存              |
+| DBアクセス      | **`@supabase/supabase-js`**              | バックエンドからのデータ操作                |
+| 定期実行        | **Supabase Cron**                        | 5〜10分おきに判定APIを呼ぶ              |
+| Discord連携   | **HTTP Interactions + Discord REST API** | コマンド受付・フォーム・投稿                |
+| Discord署名検証 | **`discord-interactions`**               | 受信リクエストの検証                    |
+| GitHub本人確認  | **GitHub OAuth App**                     | Discord IDとGitHub IDの紐付け      |
+| GitHubデータ取得 | **GitHub REST API / `@octokit/rest`**    | リポジトリ・コミットの取得                 |
+| 入力検証        | **Zod**                                  | 宣言や設定の入力チェック                  |
+
+```text
+Discord
+  ↓ コマンド・フォーム
+Next.js on Vercel
+  ├─ Supabase DB：宣言・結果を保存
+  ├─ GitHub OAuth：本人確認
+  ├─ GitHub API：コミット確認
+  └─ Discord API：メッセージ投稿
+
+Supabase Cron
+  ↓ 定期呼び出し
+Next.jsの判定API
+  ↓
+期限を過ぎた未判定の宣言だけ確認
+```
+
+**常駐型のGateway Botは採用せず、HTTP方式を基本とする。** Google Apps Script、Firebase、Prisma、独自のチャンネルWebhook URL管理は、このMVP案には含めない。
+
+## 7. 主なデータ
+
+| テーブル             | 主な項目                                                    |
+| ---------------- | ------------------------------------------------------- |
+| `users`          | DiscordユーザーID、GitHubユーザーID、GitHubユーザー名                  |
+| `guild_settings` | DiscordサーバーID、通知先チャンネルID                                |
+| `memberships`    | サーバーID、ユーザーID、参加状態                                      |
+| `declarations`   | 宣言者、サーバー、内容、リポジトリ、ブランチ、登録時刻、期限、判定状態、検出コミットSHA、確認日時、通知状態 |
+
+加えて、GitHub OAuthの連携用一時情報と、再試行に必要な情報を管理する。
+
+**秘密情報はバックエンドで管理し、サーバーをまたぐデータの閲覧・変更を防ぐ。** 初期設定は権限のある人だけ、宣言の取消は本人だけが実行できるようにする。
+
+## 8. MVPに含めないもの
+
+| 対象外・後回し     | 内容                                |
+| ----------- | --------------------------------- |
+| 独立したWeb UI  | Webダッシュボード、ログイン画面、独自のチーム作成・招待画面   |
+| 高度なGitHub対応 | 非公開リポジトリ、複数ブランチ横断、宣言内容の完成判定       |
+| AI・演出の拡張    | LLMによる文章生成、煽り強度の選択                |
+| 継続支援の拡張     | 宣言前リマインド、週次サマリー                   |
+| その他         | スマホアプリ、GitHub以外のGitサービス、ポイント・報酬設計 |
+
+## 9. 完成条件
+
+**最初に完成させるのは、「宣言 → 保存 → GitHub確認 → 結果投稿」の一周。** その後に状況表示・集計・例外処理を仕上げる。
+
+MVP完成は、次を満たす状態とする。
+
+* 3人が自分のGitHubアカウントを連携し、Discordから宣言・取消・状況確認を行える。
+* **手動操作なしで**期限後の判定と結果投稿が実行される。
+* 達成・未達成の両方を再現でき、API障害を未達成にせず、定期処理の重複で同じ結果を繰り返し投稿しない。
+* 自分たちの利用履歴が保存され、発表で実際の宣言・コミット・通知・集計を示せる。
+
+なお、このMVPが扱うのは**「宣言した後の行動促進」**まで。宣言自体をしない人への働きかけは、宣言前リマインドなどの拡張で扱う。
