@@ -1,0 +1,90 @@
+import "server-only";
+import { Octokit } from "@octokit/rest";
+import { z } from "zod";
+import { appOrigin, env } from "./config";
+import { type Declaration, UserError } from "./domain";
+
+export function githubClient() {
+  return new Octokit({
+    auth: process.env.GITHUB_API_TOKEN || undefined,
+    userAgent: "nomoreyarukithief-mvp",
+    request: { timeout: 8_000 },
+    log: { debug() {}, info() {}, warn() {}, error() {} },
+  });
+}
+
+const headers = { "X-GitHub-Api-Version": "2026-03-10" };
+
+export async function validateRepository(repository: string, branch?: string, client = githubClient()) {
+  const [owner, repo] = repository.split("/");
+  const signal = AbortSignal.timeout(15_000);
+  try {
+    const { data } = await client.repos.get({ owner, repo, headers, request: { signal } });
+    if (data.private || data.visibility && data.visibility !== "public") throw new UserError("公開リポジトリのみ指定できます。");
+    const selected = branch ?? data.default_branch;
+    const checked = await client.repos.getBranch({ owner, repo, branch: selected, headers, request: { signal } });
+    return { repository: data.full_name, branch: checked.data.name };
+  } catch (error) {
+    if (error instanceof UserError) throw error;
+    if (error && typeof error === "object" && "status" in error && error.status === 404) {
+      throw new UserError("公開リポジトリまたはブランチが見つかりません。少なくとも1件コミットのあるブランチを指定してください。");
+    }
+    throw new UserError("GitHubを確認できませんでした。宣言はまだ保存していません。時間をおいて再実行してください。");
+  }
+}
+
+export type CommitCandidate = {
+  sha: string;
+  author: { id?: number } | null;
+  commit: { committer: { date?: string } | null };
+};
+
+export function matchesDeclaration(commit: CommitCandidate, declaration: Declaration) {
+  if (commit.author?.id !== declaration.github_id) return false;
+  const date = Date.parse(commit.commit.committer?.date ?? "");
+  if (!Number.isFinite(date)) throw new Error("Missing commit timestamp");
+  return date >= Date.parse(declaration.created_at) && date <= Date.parse(declaration.deadline);
+}
+
+export async function findQualifyingCommit(declaration: Declaration, signal: AbortSignal, client = githubClient()): Promise<string | null> {
+  const [owner, repo] = declaration.repository.split("/");
+  const request = { signal };
+  // A formerly public repository becoming private is a verification error, never a failure.
+  const { data: repository } = await client.repos.get({ owner, repo, headers, request });
+  if (repository.private || repository.visibility && repository.visibility !== "public") throw new Error("Repository is no longer public");
+  // Check the named branch even if its history has since disappeared or changed.
+  const { data: branch } = await client.repos.getBranch({ owner, repo, branch: declaration.branch, headers, request });
+  for (let page = 1; page <= 20; page++) {
+    const { data, headers: responseHeaders } = await client.repos.listCommits({
+      owner, repo, sha: branch.commit.sha,
+      // Expand server-side bounds by a second; the local inclusive comparison is authoritative.
+      since: new Date(Date.parse(declaration.created_at) - 1000).toISOString(),
+      until: new Date(Date.parse(declaration.deadline) + 1000).toISOString(),
+      per_page: 100, page, headers, request,
+    });
+    const match = data.find((commit) => matchesDeclaration(commit, declaration));
+    if (match) return match.sha;
+    if (!responseHeaders.link?.includes('rel="next"')) return null;
+  }
+  // Never report failure when pagination was incomplete.
+  throw new Error("Commit scan limit reached");
+}
+
+export async function exchangeGitHubCode(code: string, verifier: string) {
+  const signal = AbortSignal.timeout(15_000);
+  const response = await fetch("https://github.com/login/oauth/access_token", {
+    method: "POST", headers: { Accept: "application/json", "Content-Type": "application/json" },
+    body: JSON.stringify({ client_id: env("GITHUB_CLIENT_ID"), client_secret: env("GITHUB_CLIENT_SECRET"),
+      code, code_verifier: verifier, redirect_uri: `${appOrigin()}/api/github/callback` }),
+    signal, cache: "no-store",
+  });
+  if (!response.ok) throw new Error("GitHub OAuth exchange failed");
+  const token = z.object({ access_token: z.string().min(1) }).parse(await response.json());
+  const identity = await fetch("https://api.github.com/user", {
+    headers: { ...headers, Accept: "application/vnd.github+json", Authorization: `Bearer ${token.access_token}` },
+    signal, cache: "no-store",
+  });
+  if (!identity.ok) throw new Error("GitHub identity check failed");
+  // The user token is only used here. It is never stored in the DB or in a cookie.
+  return z.object({ id: z.number().int().positive().safe(), login: z.string().min(1) }).parse(await identity.json());
+}
