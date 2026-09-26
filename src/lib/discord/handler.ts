@@ -41,7 +41,7 @@ export async function handleCommand(interaction: Interaction, deps: CommandDepen
     const origin = deps.origin();
     const ticket = randomToken();
     await deps.store.issueOAuth(hashToken(ticket), guildId, discordId);
-    return { message: { content: `[GitHubアカウントを連携する](${origin}/api/github/start?ticket=${ticket})\nリンクは10分間・1回限り有効です。自分のアカウントで認可してください。` } };
+    return { message: { content: `[GitHubアカウントを連携する](${origin}/api/github/start?ticket=${ticket})\nリンクを開き「GitHubで連携する」を押してください。リンクは10分間・1回限り有効です。` } };
   }
 
   if (command.name === "declare") {

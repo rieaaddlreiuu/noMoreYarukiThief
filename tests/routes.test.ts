@@ -15,7 +15,7 @@ vi.mock("../src/lib/discord/client", () => ({ createDiscordClient: () => ({ asse
 
 import { POST as discordPost } from "../src/app/api/discord/interactions/route";
 import { POST as jobsPost } from "../src/app/api/jobs/evaluate/route";
-import { GET as oauthStart } from "../src/app/api/github/start/route";
+import { GET as oauthStart, HEAD as oauthStartHead, POST as oauthStartPost } from "../src/app/api/github/start/route";
 import { GET as oauthCallback } from "../src/app/api/github/callback/route";
 import { oauthCookieName } from "../src/lib/oauth-response";
 
@@ -78,24 +78,72 @@ describe("scheduled endpoint authentication", () => {
 describe("GitHub OAuth routes", () => {
   const state = "s".repeat(43);
   const browser = "b".repeat(43);
+  const ticket = "t".repeat(43);
+  function startPost(value = ticket, origin: string | null = "https://niki.example") {
+    return new NextRequest("https://niki.example/api/github/start", { method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", ...(origin ? { origin } : {}) },
+      body: new URLSearchParams({ ticket: value }),
+    });
+  }
   function callback(query = `state=${state}&code=code`) {
     return new NextRequest(`https://niki.example/api/github/callback?${query}`, { headers: { cookie: `${oauthCookieName(state)}=${browser}` } });
   }
-  it("redirects with PKCE and a secure browser cookie after consuming the ticket", async () => {
+  it("keeps tickets untouched when previews request HEAD or repeated GETs", async () => {
+    const url = `https://niki.example/api/github/start?ticket=${ticket}`;
+    const head = oauthStartHead(new NextRequest(url, { method: "HEAD" }));
+    expect(head.status).toBe(200);
+    expect(await head.text()).toBe("");
+    for (let i = 0; i < 2; i++) {
+      const response = oauthStart(new NextRequest(url));
+      expect(response.status).toBe(200);
+      expect(response.headers.get("location")).toBeNull();
+      expect(response.headers.get("set-cookie")).toBeNull();
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(response.headers.get("referrer-policy")).toBe("same-origin");
+      expect(response.headers.get("content-security-policy")).toContain("form-action 'self' https://github.com");
+      const html = await response.text();
+      expect(html).toContain('<form action="/api/github/start" method="post">');
+      expect(html).toContain(`name="ticket" value="${ticket}"`);
+      expect(html).toContain("GitHubで連携する");
+    }
+    expect(mocks.createStore).not.toHaveBeenCalled();
+    expect(mocks.beginOAuth).not.toHaveBeenCalled();
+  });
+  it("starts OAuth only on confirmation and redirects the POST as a GET with PKCE", async () => {
     mocks.beginOAuth.mockResolvedValue(true);
-    const response = await oauthStart(new NextRequest(`https://niki.example/api/github/start?ticket=${"t".repeat(43)}`));
+    const response = await oauthStartPost(startPost());
+    expect(response.status).toBe(303);
     const location = new URL(response.headers.get("location")!);
     expect(location.origin).toBe("https://github.com");
+    expect(location.searchParams.get("redirect_uri")).toBe("https://niki.example/api/github/callback");
     expect(location.searchParams.get("code_challenge_method")).toBe("S256");
     expect(location.searchParams.get("code_challenge")).toHaveLength(43);
     expect(location.searchParams.get("scope")).toBe("");
     expect(response.headers.get("set-cookie")).toContain("HttpOnly");
     expect(response.headers.get("set-cookie")).toContain("Secure");
     expect(response.headers.get("referrer-policy")).toBe("no-referrer");
+    expect(mocks.beginOAuth).toHaveBeenCalledOnce();
+  });
+  it("rejects cross-site and malformed submissions before consuming a ticket", async () => {
+    expect((await oauthStartPost(startPost(ticket, "https://other.example"))).status).toBe(403);
+    expect((await oauthStartPost(startPost(ticket, null))).status).toBe(403);
+    expect((await oauthStartPost(startPost("invalid"))).status).toBe(400);
+    expect((await oauthStartPost(new NextRequest("https://niki.example/api/github/start", {
+      method: "POST", headers: { origin: "https://niki.example", "content-type": "application/json" }, body: "{}",
+    }))).status).toBe(400);
+    expect(oauthStart(new NextRequest("https://niki.example/api/github/start?ticket=invalid")).status).toBe(400);
+    expect(mocks.createStore).not.toHaveBeenCalled();
+  });
+  it("preserves the single-use restriction after the confirmation is submitted", async () => {
+    mocks.beginOAuth.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    expect((await oauthStartPost(startPost())).status).toBe(303);
+    const repeated = await oauthStartPost(startPost());
+    expect(repeated.status).toBe(400);
+    expect(await repeated.text()).toContain("リンクが期限切れ、または使用済みです");
   });
   it("rejects expired tickets and missing browser state", async () => {
     mocks.beginOAuth.mockResolvedValue(false);
-    expect((await oauthStart(new NextRequest(`https://niki.example/api/github/start?ticket=${"t".repeat(43)}`))).status).toBe(400);
+    expect((await oauthStartPost(startPost())).status).toBe(400);
     expect((await oauthCallback(new NextRequest(`https://niki.example/api/github/callback?state=${state}&code=code`))).status).toBe(400);
     expect(mocks.exchangeGitHubCode).not.toHaveBeenCalled();
   });
