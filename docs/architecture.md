@@ -349,3 +349,267 @@ Gitの履歴には、Gateway接続（常時WebSocket接続）を使う「echoで
 | 11 | アプリ | GitHub Commit API | 対象ブランチのコミット履歴 | 上記10を受けて、期限超過の宣言ごと |
 
 この表と[1章の全体構成図](#1-全体構成図)を突き合わせながら読むと、「このアプリはハブであり、外部サービス同士が直接話すことはない」という全体像がつかめるはずです。
+
+## 9. サーバーの構成 — どのmoduleで何を作っているか
+
+ここまでは「外部サービスとどう繋がっているか」でした。ここからは視点を変えて、**Vercel上で動く「アプリ本体」そのものが、どんなnpmパッケージ（module）を組み合わせてできているか**を説明します。最後に、「AIを使わずNext.js初心者が一から同じ構成を組むならどういう手順・順番になるか」という視点でまとめます。
+
+### 9-1. 使っているモジュール一覧
+
+[package.json](../package.json)の依存関係を、役割ごとに分類します。
+
+| モジュール | 役割 | このアプリでの使いどころ |
+| --- | --- | --- |
+| `next` | Webフレームワーク本体。ルーティング・サーバー機能・ビルドを提供 | アプリ全体の土台。App Router（`src/app/`配下がそのままURLになる方式）を使用 |
+| `react` / `react-dom` | UI構築ライブラリ | [layout.tsx](../src/app/layout.tsx) / [page.tsx](../src/app/page.tsx)（トップページの案内文のみ、対話UIはDiscord側にある） |
+| `zod` | 実行時の型検証（バリデーション） | Discordから届いたJSON・ユーザー入力（宣言内容・期限など）が期待通りの形式か検証 |
+| `discord-interactions` | Discordの署名検証ヘルパー | [security.ts:19](../src/lib/security.ts#L19)の`verifyKey`（Ed25519署名検証） |
+| `@octokit/rest` | GitHub公式のAPIクライアント | [github.ts](../src/lib/github.ts)でCommit APIを呼ぶ際に使用 |
+| `@supabase/supabase-js` | SupabaseへのDBクライアント | [store.ts:2](../src/lib/store.ts#L2)の`createClient`。DB関数（RPC）呼び出しに使用 |
+| `server-only` | 「このファイルはサーバー側でしか読み込めない」と明示するだけの空パッケージ | [config.ts:1](../src/lib/config.ts#L1)、[store.ts:1](../src/lib/store.ts#L1)などの先頭。誤ってブラウザ用コードに秘密情報付きファイルを取り込んだ場合にビルドエラーにする安全装置 |
+| `tailwindcss` | CSSを部品化せず、クラス名の組み合わせで書けるようにするスタイリングツール | [globals.css](../src/app/globals.css)、トップページの見た目 |
+| `typescript` | JavaScriptに型を付ける言語拡張 | プロジェクト全体（`.ts`/`.tsx`ファイル） |
+| `vitest` | テスト実行ツール | `npm test`。GitHub/DiscordはSDK呼び出しをモックに差し替え、DBはPGliteで検証 |
+| `@electric-sql/pglite`（devDependency） | PostgreSQLをWebAssemblyで動かし、実際のSupabaseなしにSQL・RPCをテストできるようにするツール | テストコードの中だけで使用。本番では使わない |
+| `eslint` | コードの書き方チェック（静的解析） | `npm run lint` |
+
+自分でNode.js標準機能だけを使い、上記モジュールを一切使わなかった場合に代わりに必要になる作業も併記します。
+
+| モジュールが肩代わりしていること | モジュールなしで自作する場合 |
+| --- | --- |
+| `next`のルーティング | 自分で`http.createServer`を書き、URLパスごとに`if`分岐でハンドラーを呼び分ける |
+| `zod`の入力検証 | 届いたJSONの型・範囲・正規表現チェックを1つずつ手書き |
+| `discord-interactions`の署名検証 | Node.jsの`node:crypto`でEd25519の検証ロジックを自前実装（このアプリも一部は`node:crypto`を直接使用。[security.ts:1](../src/lib/security.ts#L1)） |
+| `@octokit/rest`のAPI呼び出し | `fetch()`でGitHubのURLとヘッダーを直接組み立てる（実際、Discord側は`@octokit`を使わず素の`fetch`で自作している。[client.ts:17](../src/lib/discord/client.ts#L17)） |
+| `@supabase/supabase-js`のDB接続 | PostgreSQL用のドライバ（`pg`など）で直接SQL接続文字列を扱う |
+
+この比較から分かる通り、**モジュールは「車輪の再発明をしない」ためのショートカット**であり、仕組みそのもの（HTTPで受けてHTTPで返す、JSONを検証する、署名を確かめる）はどれも普通のプログラミングの延長です。実際、このプロジェクトはDiscord/GitHubへの発信を専用SDKでなく素の`fetch`で書いており（`@octokit/rest`は受信済みコミット取得のみに限定使用）、**「モジュールを使う部分」と「素の`fetch`で十分な部分」を線引きしている**実例にもなっています。
+
+### 9-2. ディレクトリ構成とApp Routerの考え方
+
+```
+src/
+├─ app/                          ← ここがそのままURLになる（App Router）
+│  ├─ layout.tsx                  全ページ共通の外枠（<html>など）
+│  ├─ page.tsx                    "/" のページ本体
+│  ├─ globals.css                 全体CSS
+│  └─ api/                        "/api/..." のHTTPエンドポイント群
+│     ├─ discord/interactions/route.ts   POST /api/discord/interactions
+│     ├─ github/start/route.ts           GET/POST /api/github/start
+│     ├─ github/callback/route.ts        GET /api/github/callback
+│     └─ jobs/evaluate/route.ts          POST /api/jobs/evaluate
+└─ lib/                          ← URLを持たない、純粋なロジック置き場
+   ├─ config.ts                    環境変数の読み出し・検証
+   ├─ security.ts                  署名検証・トークン生成などの暗号系ユーティリティ
+   ├─ domain.ts                    ドメインのルール（期限のパース、集計計算など）
+   ├─ store.ts                     Supabase呼び出しの窓口
+   ├─ github.ts                    GitHub API呼び出しの窓口
+   ├─ jobs.ts                      Cronバッチのロジック
+   └─ discord/
+      ├─ client.ts                 Discordへの発信窓口
+      ├─ handler.ts                 /niki サブコマンドの分岐処理
+      ├─ commands.ts                Discordに登録するコマンド定義（データ）
+      ├─ messages.ts                Discordへ送るメッセージ本文の組み立て
+      └─ permissions.ts             Discord権限ビットの計算
+```
+
+App Routerの最大の特徴は、**「`app/`配下のフォルダ階層＝URLのパス階層」というファイルベースルーティング**です。`app/api/discord/interactions/route.ts`というファイルパスがそのまま`/api/discord/interactions`というURLになり、そのファイルの中の`export async function POST(request)`が「このURLにPOSTが来た時の処理」になります。ルーティング設定ファイルを別に書く必要がありません。
+
+`app/`の外にある`lib/`は、Next.jsが特別扱いするディレクトリではなく、**「URLを持たない、ただのTypeScriptモジュール」を置くための開発者側の整理**です。`route.ts`側は薄く保ち（受信・検証・呼び出しの配線だけ）、実際の判断ロジックは`lib/`に切り出す、という一般的な設計方針がこのリポジトリでも徹底されています（例えば[route.ts](../src/app/api/discord/interactions/route.ts)は52行しかなく、実処理は[handler.ts](../src/lib/discord/handler.ts)・[jobs.ts](../src/lib/jobs.ts)側にあります）。
+
+### 9-3. リクエスト1本が処理される流れ（コードレベル）
+
+`/niki declare ...`を例に、実際に呼ばれる関数を上から順に追います。
+
+```
+route.ts        POST(request)
+  ├─ security.ts   verifyDiscordRequest()         ← 署名検証
+  ├─ handler.ts    interactionSchema.safeParse()  ← zodでJSON形式を検証
+  └─ (after)
+     handler.ts    handleCommand()
+       ├─ store.ts     requireMember()             ← Supabaseへ問い合わせ
+       ├─ domain.ts    declarationInput.parse()    ← 入力値（内容・期限など）を検証
+       ├─ domain.ts    parseDeadline()             ← 日本時間の文字列をUTCへ変換
+       ├─ github.ts    validateRepository()        ← GitHubにリポジトリ・ブランチの実在確認
+       └─ store.ts     createDeclaration()         ← SupabaseのRPCを呼び、DBへ保存
+     client.ts      editReply()                    ← Discordへ結果を返信
+```
+
+このように、**1つのエンドポイント（`route.ts`）が、複数の`lib/`モジュールを順番に呼び出す「配線役」**になっているのが、このアプリのサーバー構成の基本パターンです。他の3つのエンドポイント（`github/start`、`github/callback`、`jobs/evaluate`）も同じ形（受信 → 検証 → `lib/`の関数を呼ぶ → 応答）を繰り返しています。
+
+### 9-4. もしNext.js初心者がAIを使わず一から組むなら
+
+「知識ゼロから、既存のAI支援なしにこの構成へたどり着くには」という前提で、実際に手を動かす順番の目安を示します。一気に全部作ろうとせず、**小さく動くものを積み上げる**のが唯一の現実的な進め方です。
+
+| 段階 | やること | この段階で学ぶこと |
+| --- | --- | --- |
+| ① | `npx create-next-app` でプロジェクトを作り、`npm run dev`でトップページが表示されることを確認する | Next.jsの基本的な起動・ビルドの流れ |
+| ② | `app/api/hello/route.ts` を自分で作り、`export function GET() { return Response.json({ ok: true }) }` を書いて`/api/hello`にアクセスできることを確認する | App RouterのRoute Handlerの書き方（ファイル＝URLという感覚） |
+| ③ | Discord Developer Portalで自分のBotアプリを作り、[Discord公式のInteractions解説](https://docs.discord.com/developers/interactions/receiving-and-responding)を読みながら、まず「署名検証なしでPINGにPONGを返すだけ」のエンドポイントを作る（**この段階ではローカルで完結せず、ngrok等の公開URLが要る**ことに早めに気づくのが重要） | Webhook型の外部連携の基本形。3秒ルールの存在 |
+| ④ | `discord-interactions`パッケージを入れ、公式ドキュメント通りに署名検証を追加する | 「公開URLだから誰でも叩ける」→「だから検証が要る」という因果関係 |
+| ⑤ | 1個だけスラッシュコマンドを手動でDiscord REST APIに登録するスクリプトを書き、実際にDiscordでコマンドを打って、ハードコードした固定文言を返せるようにする | コマンド登録（設定）と実行時処理（配信）が別物であること |
+| ⑥ | `zod`を導入し、受け取ったコマンドの形式を検証してから処理する形に直す | 「外部から来たデータは信用しない」という原則と、型安全な検証の書き方 |
+| ⑦ | 3秒以内に処理が終わらないケースを想定し、Discordのdeferred応答（`type: 5`）→後から`editReply`で編集、という2段階に直す | 同期応答と非同期処理の分離、Next.jsの`after()` |
+| ⑧ | Supabaseの無料プロジェクトを作り、`@supabase/supabase-js`で最小限のテーブル（例: メッセージのログ）に読み書きしてみる | 外部マネージドDBの使い方、環境変数でのURL・キー管理 |
+| ⑨ | RLSを有効化し、まず「ポリシーなしで全部拒否」を体験してから、`service_role`だけ許可する設計に気づく | 「デフォルト拒否」のセキュリティ思想 |
+| ⑩ | GitHub OAuth Appを作り、`state`だけ（PKCE無し）のシンプルなAuthorization Code Flowを実装して動かす | ブラウザ経由のリダイレクト型連携の基本形（Webhook型との違い） |
+| ⑪ | ここまで動いたら、PKCE・HttpOnly Cookieを追加して攻撃耐性を上げる | セキュリティは「後から積み増せる」設計にしておくと学習しやすい |
+| ⑫ | Vercelにデプロイし、本番URLでDiscord/GitHubの設定を向け直す。ローカルとの違い（環境変数、HTTPS必須）にここで初めて直面する | 開発環境と本番環境の差分吸収 |
+| ⑬ | Supabase CronでVercelの自作APIを定期的に叩けるようにし、Bearerトークンで認証する | 「サーバーレスにはタイマーがない」問題の一般的な解決パターン |
+| ⑭ | 二重実行・重複通知が起きることを実際に確認してから、lease・nonce・履歴照合などの対策を足す | 「まず素朴に作って壊れ方を見てから対策する」という順序の重要性 |
+
+この順番のポイントは、**「Discord Webhook」「GitHub OAuth」「Supabase DB」「Cron」の4本柱を、それぞれ最小構成で一度動かしてから、後で安全対策（署名検証・PKCE・RLS・排他制御）を足していく**という進め方です。最初から全部の防御を実装しようとすると、何が壊れているのか切り分けられず挫折しやすいので、**「動く→正しくする→安全にする」の3段階**を意識すると一からでも到達可能な規模の構成です。
+
+## 10. APIサーバーの構成としくみ（Route Handlerの書き方）
+
+9章では「どのモジュールを使っているか」という部品の話をしました。ここでは、**「TypeScriptで実際にAPIサーバーをどう書くか」**という、コードの文法・作法に絞って説明します。Next.js（App Router）でAPIを書く時の単位は **Route Handler** と呼ばれます。
+
+### 10-1. Route Handlerの最小形
+
+`app/`配下の好きなフォルダに`route.ts`というファイルを置き、HTTPメソッド名と同じ名前の関数を`export`するだけで、そのURLのAPIが出来上がります。
+
+```ts
+// app/api/hello/route.ts
+export async function GET() {
+  return Response.json({ message: "Hello" });
+}
+```
+
+これだけで `GET /api/hello` が動きます。対応できるメソッド名は `GET` `POST` `PUT` `PATCH` `DELETE` `HEAD` `OPTIONS` で、**定義していないメソッドで呼ばれると自動的に405エラーになります**。「ルーティング設定を別ファイルに書く」という作業がそもそも存在せず、**ファイルの置き場所＝URL、関数名＝HTTPメソッド**というのがNext.jsのApp Routerの根本ルールです。
+
+### 10-2. リクエストの受け取り方
+
+引数の`request`は、ブラウザ標準の[`Request`](https://developer.mozilla.org/docs/Web/API/Request)そのもの（またはそれを拡張した`NextRequest`）です。特別な独自APIではなく、**Web標準のFetch APIと同じ形**で読み書きできます。
+
+| 取り出したいもの | 書き方 | このアプリでの実例 |
+| --- | --- | --- |
+| リクエストボディ（文字列） | `await request.text()` | [route.ts:39](../src/app/api/discord/interactions/route.ts#L39)（Discordの署名検証は生の文字列が必要なため） |
+| リクエストボディ（JSON） | `await request.json()` | 一般的なAPIで最もよく使う形（このアプリはDiscordの都合で`text()`→自前`JSON.parse`を使用） |
+| フォームデータ | `await request.formData()` | [start/route.ts:27](../src/app/api/github/start/route.ts#L27) |
+| ヘッダー | `request.headers.get("authorization")` | [evaluate/route.ts:17](../src/app/api/jobs/evaluate/route.ts#L17) |
+| クエリパラメータ（`?ticket=xxx`） | `request.nextUrl.searchParams.get("ticket")`（`NextRequest`限定の便利機能） | [start/route.ts:10](../src/app/api/github/start/route.ts#L10) |
+| Cookie | `request.cookies.get("name")?.value`（`NextRequest`限定） | [callback/route.ts:14](../src/app/api/github/callback/route.ts#L14) |
+
+`request.text()`と`request.json()`はどちらか一方しか呼べません（ボディは一度しか読めないストリームだからです）。JSONを期待するAPIでも、**署名検証のように「元の文字列のまま」でないと検証できない処理がある場合は`text()`で受けてから自分で`JSON.parse`する**必要があります。これがまさに[route.ts:39-44](../src/app/api/discord/interactions/route.ts#L39-L44)の書き方です。
+
+### 10-3. レスポンスの返し方
+
+返す値も同様にWeb標準の[`Response`](https://developer.mozilla.org/docs/Web/API/Response)です。よく使う3パターンを覚えれば大抵書けます。
+
+```ts
+// ① JSONを返す（一番よく使う）
+return Response.json({ ok: true });
+return Response.json({ error: "Bad Request" }, { status: 400 });
+
+// ② ステータスコードだけ・本文なしで返す
+return new Response("Invalid signature", { status: 401 });
+
+// ③ HTMLなど、JSON以外を返す（Content-Typeを自分で指定）
+return new Response("<h1>Hi</h1>", { headers: { "Content-Type": "text/html" } });
+```
+
+このアプリでは[oauth-response.ts](../src/lib/oauth-response.ts)が③のパターンで、GitHub連携の案内画面をHTML文字列として直接組み立てて返しています（Reactコンポーネントを使わず、素の文字列＋`new Response`で十分なケースです）。
+
+Next.js独自の`NextResponse`（`next/server`からimport）はこの`Response`を拡張したもので、**Cookieの設定**や**リダイレクト**を書きやすくしてくれます。
+
+```ts
+import { NextResponse } from "next/server";
+
+// Cookieを付けて返す
+const response = NextResponse.json({ ok: true });
+response.cookies.set("name", "value", { httpOnly: true, maxAge: 600 });
+
+// リダイレクトする（303 = POSTの結果をGETで転送させる、というHTTPの正しい作法）
+return NextResponse.redirect(url, 303);
+```
+
+実例: [start/route.ts:43-44](../src/app/api/github/start/route.ts#L43-L44)でGitHubの認可ページへ`NextResponse.redirect`し、同時に`response.cookies.set`でCookieを仕込んでいます。
+
+### 10-4. 「このAPIの動作モード」を指定する設定変数
+
+`route.ts`の中では、関数の外側に特別な名前の変数を`export`することで、Next.js側の挙動を切り替えられます。このアプリで使っているのは2つです。
+
+```ts
+export const runtime = "nodejs";   // 実行環境をNode.js標準に固定する
+export const maxDuration = 60;     // このAPIの最大実行時間（秒）
+```
+
+- `runtime = "nodejs"`: Next.jsには軽量な"Edge"実行環境という選択肢もありますが、`node:crypto`（署名検証やハッシュ計算）やSupabaseクライアントなど、Node.js標準機能に依存するコードを使うため、全APIで明示的にNode.js環境を指定しています（[route.ts:10](../src/app/api/discord/interactions/route.ts#L10)ほか）。
+- `maxDuration = 60`: GitHub APIへの問い合わせなど、時間がかかる可能性のある処理があるAPIに設定し、Vercelにタイムアウトを60秒まで許可してもらう指定です。
+
+これらは`route.ts`ファイルごとに個別設定でき、「このAPIは重い処理をするから長め」「こっちは軽いからデフォルトのまま」と使い分けられます。
+
+### 10-5. エラーハンドリングの型
+
+外部連携が多いAPIサーバーでは、**「失敗したときに何を返すか」を先に設計しておく**ことが重要です。このアプリの各`route.ts`は、だいたい次の型で書かれています。
+
+```ts
+export async function POST(request: Request) {
+  // ① 設定不備（環境変数が無いなど）→ 503
+  let secret: string;
+  try { secret = env("CRON_SECRET"); }
+  catch { return Response.json({ error: "Not configured" }, { status: 503 }); }
+
+  // ② 認証・認可の失敗 → 401 / 403
+  if (!正しい) return Response.json({ error: "Unauthorized" }, { status: 401 });
+
+  // ③ 本処理。失敗したら握りつぶさず、ログに残してから503などを返す
+  try {
+    const result = await 本処理();
+    return Response.json(result);
+  } catch (error) {
+    console.error("処理に失敗", safeError(error));   // 生のエラーをそのまま出さない
+    return Response.json({ error: "Evaluation unavailable" }, { status: 503 });
+  }
+}
+```
+
+（実例: [evaluate/route.ts](../src/app/api/jobs/evaluate/route.ts)がほぼこの型そのままです）
+
+ポイントは2つあります。
+
+1. **エラーの種類ごとにステータスコードを使い分ける**（設定不備=503、認証失敗=401、入力不正=400、想定外の失敗=503など）。呼び出す側（Discord・GitHub・Supabase Cron）が、どう再試行すべきかをステータスコードから判断できるようにするためです。
+2. **`console.error`に出すエラーは[security.ts](../src/lib/security.ts)の`safeError()`で加工してから出す**（[security.ts:23-29](../src/lib/security.ts#L23-L29)）。外部SDKの生のエラーオブジェクトには、Authorizationヘッダーやトークンなどの秘密情報がそのまま含まれていることがあるため、ログにすら残さないという方針です。
+
+### 10-6. zodによる「型は合っているが値がおかしい」への対処
+
+TypeScriptの型チェックは**コンパイル時**にしか効きません。外部（Discordやユーザー入力）から届くデータは実行時には「ただのJSON」でしかなく、TypeScriptの型は保証してくれません。そこで`zod`を使い、**実行時に「本当にこの形をしているか」を1回だけ確認し、以後はTypeScriptの型として安心して使う**という書き方をします。
+
+```ts
+import { z } from "zod";
+
+const bodySchema = z.object({
+  name: z.string().min(1).max(100),
+  age: z.number().int().min(0),
+});
+
+export async function POST(request: Request) {
+  const json = await request.json();
+  const parsed = bodySchema.safeParse(json);
+  if (!parsed.success) {
+    return Response.json({ error: "Invalid body" }, { status: 400 });
+  }
+  // ここから先は parsed.data が { name: string; age: number } 型として安全に使える
+}
+```
+
+実例: [handler.ts:9-17](../src/lib/discord/handler.ts#L9-L17)の`interactionSchema`が、Discordから届くコマンドの形式（コマンド名・オプション・権限など）を丸ごと検証しています。`safeParse`は失敗しても例外を投げず`{ success: false }`を返すため分岐が書きやすく、`parse`は失敗すると例外を投げるため「呼び出し元で`try/catch`する」書き方に向いています（このアプリは場面によって両方使い分けています）。
+
+### 10-7. まとめ: Route Handler 1つの標準的な骨格
+
+9章と10章の内容を合わせると、このアプリの`route.ts`はどれも次の骨格に収束します。
+
+```ts
+export const runtime = "nodejs";      // ← 実行環境の指定（必要なら）
+export const maxDuration = 60;        // ← タイムアウト延長（必要なら）
+
+export async function POST(request: Request) {
+  // 1. 設定・認証まわりの前提条件を確認する（早期return）
+  // 2. リクエストの中身を取り出す（text/json/formData/searchParams/cookies）
+  // 3. zodなどで形式を検証する
+  // 4. lib/ 配下の関数を呼んで実処理をする（DBアクセス・外部API呼び出し）
+  // 5. 成功/失敗に応じたステータスコードでResponseを返す
+}
+```
+
+この「受け取る→検証する→lib/に処理を委譲する→返す」という型さえ覚えてしまえば、Next.jsのAPIサーバーは**普通のTypeScript関数の集まり**として書けます。特別なフレームワーク文法を大量に覚える必要はなく、Web標準の`Request`/`Response`とファイル配置のルールさえ押さえれば十分です。
