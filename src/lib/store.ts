@@ -8,7 +8,7 @@ export type OAuthSession = { discord_id: string; guild_id: string; code_verifier
 
 export interface JobStore {
   claimCheck(): Promise<Declaration | null>;
-  finishCheck(row: Declaration, sha: string | null): Promise<boolean>;
+  finishCheck(row: Declaration, sha: string | null, aiReason?: string): Promise<boolean>;
   retryCheck(row: Declaration, error: string, delay: number): Promise<void>;
   claimNotification(declarationId?: string): Promise<Notification | null>;
   getDeclaration(id: string): Promise<Declaration>;
@@ -100,8 +100,8 @@ export function createStore() {
     },
     cleanup() { return rpc<void>("niki_cleanup"); },
     claimCheck() { return first(rpc<Declaration[]>("niki_claim_check")); },
-    finishCheck(row: Declaration, sha: string | null) {
-      return rpc<boolean>("niki_finish_check", { p_id: row.id, p_lease: row.lease_token, p_sha: sha });
+    finishCheck(row: Declaration, sha: string | null, aiReason?: string) {
+      return rpc<boolean>("niki_finish_check", { p_id: row.id, p_lease: row.lease_token, p_sha: sha, p_ai_reason: aiReason ?? null });
     },
     retryCheck(row: Declaration, error: string, delay: number) {
       return rpc<void>("niki_retry_check", { p_id: row.id, p_lease: row.lease_token, p_error: error, p_delay: delay });

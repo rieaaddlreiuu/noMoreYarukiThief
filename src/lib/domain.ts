@@ -22,6 +22,7 @@ export type Declaration = {
   deadline: string;
   status: DeclarationStatus;
   commit_sha: string | null;
+  ai_reason: string | null;
   checked_at: string | null;
   check_attempts: number;
   last_check_error: string | null;

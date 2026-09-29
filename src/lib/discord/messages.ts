@@ -25,6 +25,7 @@ export function notificationMessage(row: Notification, d: Declaration): Message 
         { name: "対象", value: target(d) },
         { name: "期限", value: formatJst(d.deadline) },
         ...(row.kind === "result" && succeeded ? [{ name: "確認したコミット", value: `[${d.commit_sha?.slice(0, 7)}](${commitUrl(d)})` }] : []),
+        ...(row.kind === "result" && !succeeded && d.ai_reason ? [{ name: "AIの判定理由", value: discordText(d.ai_reason) }] : []),
       ], footer: { text: notificationMarker(row.id) },
     }],
   };

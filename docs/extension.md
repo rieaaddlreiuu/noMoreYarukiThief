@@ -14,6 +14,8 @@
 
 ## 1. コミットメッセージをAIが読んで、宣言を達成したか判断する
 
+> **ステータス: 実装済み** — 以下の仕様・処理フローに沿って実装しました。「実装方針」の表に実際の変更ファイルへのリンクを反映済みです。
+
 ### 課題
 
 現在の[matchesDeclaration](src/lib/github.ts#L42-L47)は「本人のコミットが期限内に存在するか」だけを見ており、コミット内容が宣言（`declarations.content`）と関係あるかは判定していません。
@@ -41,19 +43,20 @@
 
 | 変更対象 | 内容 |
 | --- | --- |
-| 新規 `src/lib/ai.ts` | `judgeCommits(content, candidates, signal)` を実装。[client.ts](src/lib/discord/client.ts)と同様、SDKを追加せず`fetch`でGemini REST APIを叩く。レスポンスは`z.object({ matchedIndex: z.number().int().nullable(), reason: z.string().max(200) })`で検証 |
-| [github.ts](src/lib/github.ts) | `CommitCandidate`に`commit.message`を追加。`findQualifyingCommit`を「全候補収集→分岐」に変更し、戻り値を`{ sha: string; aiReason?: string } \| null`に変更 |
-| 新規マイグレーション | `declarations`に`ai_reason text`（nullable）列を追加。`niki_finish_check`に`p_ai_reason`引数を追加（または新関数）。既存の`revoke`/`grant`パターン（`service_role`のみ許可）を踏襲 |
+| 新規 [ai.ts](src/lib/ai.ts) | `judgeCommits(content, candidates, signal)` を実装。[client.ts](src/lib/discord/client.ts)と同様、SDKを追加せず`fetch`でGemini REST APIを叩く。レスポンスは`z.object({ matchedIndex: z.number().int().nullable(), reason: z.string().max(200) })`で検証し、範囲外indexは`null`扱いにする |
+| [github.ts](src/lib/github.ts) | `CommitCandidate`に`commit.message`を追加。`findQualifyingCommit`を「全候補収集→分岐」に変更し、戻り値を`{ sha: string; aiReason?: string } \| null`に変更。ページ走査未完了チェックはAI判定より先に行う |
+| 新規 [202609300001_ai_judgement.sql](supabase/migrations/202609300001_ai_judgement.sql) | `declarations`に`ai_reason text`（nullable、500文字以内のcheck制約）列を追加。`niki_finish_check(uuid,uuid,text)`を`drop function`し、`p_ai_reason`引数を追加した新シグネチャで再作成。新シグネチャに対して`revoke`/`grant`（`service_role`のみ許可）をやり直す |
 | [store.ts](src/lib/store.ts) | `finishCheck(row, sha, aiReason?)`に対応 |
-| [jobs.ts](src/lib/jobs.ts) | `checkOne`の呼び出しを新しい戻り値の形に合わせて更新。Gemini呼び出しの例外は既存の`retryCheck`経路にそのまま乗せる（未達成にしない） |
-| [messages.ts](src/lib/discord/messages.ts) | `notificationMessage()`の`failed`ケースで、`d.ai_reason`があれば理由を埋め込みフィールドに追加表示（`discordText()`でエスケープ） |
-| `.env.example` / `docs/setup.md` | `GEMINI_API_KEY`（任意）を追記。未設定時は従来通りと明記 |
+| [jobs.ts](src/lib/jobs.ts) | `checkOne`の呼び出しを新しい戻り値の形に合わせて更新。Gemini呼び出しの例外は既存の`retryCheck`経路にそのまま乗る（未達成にしない） |
+| [messages.ts](src/lib/discord/messages.ts) | `notificationMessage()`の`result`かつ未達成のケースで、`d.ai_reason`があれば「AIの判定理由」フィールドを追加表示（`discordText()`でエスケープ） |
+| `.env.example` / [docs/setup.md](docs/setup.md) | `GEMINI_API_KEY`（任意）を追記。未設定時は従来通りと明記。マイグレーション適用順序（コードデプロイより先に適用）も明記 |
+| [tests/ai.test.ts](tests/ai.test.ts)・[tests/github.test.ts](tests/github.test.ts)・[tests/database.test.ts](tests/database.test.ts)・[tests/domain.test.ts](tests/domain.test.ts) | 正常系・HTTPエラー・スキーマ不正・APIキー未設定・PGliteでの新マイグレーション適用と権限・Discord表示のエスケープを検証 |
 
 ### 検討事項
 
-- **プロンプトインジェクション**: `content`（宣言者入力）も`commit.message`（コミット作者入力）も信頼できない外部入力。システム指示とデータを明確に分離し、構造化出力を強制する。`reason`はDiscord表示前に必ずエスケープする
-- **候補が多い宣言**: コミット数が多いと、まとめて渡すプロンプトが長くなる。候補数に上限（例: 先頭50件など）を設けることを検討
-- **判定基準のブレ**: 「宣言内容とコミットメッセージが一致する」の粒度をAIがどう解釈するかは実行のたびに揺れうる。厳密な採点基準ではなく「明らかに無関係な変更でなければ許容する」程度の緩い基準にする方が、誤って未達成にする事故を避けやすい
+- **プロンプトインジェクション**: `content`（宣言者入力）も`commit.message`（コミット作者入力）も信頼できない外部入力。システム指示とデータを明確に分離し、構造化出力を強制する。`reason`はDiscord表示前に必ずエスケープする（対応済み）
+- **候補が多い宣言**: コミット数が多いと、まとめて渡すプロンプトが長くなる。候補数の上限（例: 先頭50件など）は**未実装**。運用で問題が出た場合に追加検討する
+- **判定基準のブレ**: 「宣言内容とコミットメッセージが一致する」の粒度をAIがどう解釈するかは実行のたびに揺れうる。厳密な採点基準ではなく「明らかに無関係な変更でなければ許容する」程度の緩い基準にする方が、誤って未達成にする事故を避けやすい（システムプロンプトの調整余地として残る）
 
 ---
 
