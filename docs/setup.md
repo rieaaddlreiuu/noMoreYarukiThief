@@ -52,6 +52,19 @@ Supabase SQL Editorで [初期マイグレーション](../supabase/migrations/2
 
 全テーブルでRLSを有効にし、anon/authenticatedからのアクセスとRPC実行を許可していません。アクセスは署名や権限を検証したバックエンドのservice roleに限定しています。
 
+### 2-1. RLSと権限の詳細
+
+[初期マイグレーション](../supabase/migrations/202609260001_mvp.sql) の末尾で、全テーブルに対して以下を行っています。
+
+- `alter table ... enable row level security` を実行しつつ、許可ポリシー(`create policy`)は1件も作成しません。ポリシーが存在しないRLS有効テーブルは、ポリシー対象ロールからのアクセスが全件拒否されます。
+- `revoke all ... from public, anon, authenticated` で、SupabaseのAPIキー経由でアクセスする`anon`ロール・`authenticated`ロールおよび`public`から、SELECT/INSERT/UPDATE/DELETEを含む全権限を明示的に剥奪します。
+- `grant all ... to service_role` で、`service_role`にのみ全テーブルへのアクセスを許可します。
+- `niki_`プレフィックスの関数(`niki_link_github`、`niki_create_declaration`など)も同様に、`public`/`anon`/`authenticated`から`revoke`し、`service_role`にのみ`execute`を`grant`します。各関数は`set search_path = ''`を指定し、スキーマ名を必ず`public.`修飾で参照することでsearch_path経由のなりすましを防いでいます。
+
+この構成により、ブラウザから直接Supabaseへ接続する用途（anon keyを使うクライアント）は一切機能しません。データベース操作は必ずNext.jsのサーバー側（Route Handler）が`SUPABASE_SERVICE_ROLE_KEY`を使って行い、Discordの署名検証・Discord/GitHubの本人確認を通過したリクエストだけがこれらの関数を呼び出せます。**anon keyはこのプロジェクトでは使用しません**。Supabaseダッシュボードの Project Settings → API に表示される`anon` `public`キーを`.env.local`や本番環境変数に設定しないでください。
+
+追加でテーブルやRPCを増やす場合も、この「RLS有効化 + ポリシーなし + service_roleのみgrant」のパターンを踏襲し、anon/authenticatedへ権限を付与しないでください。
+
 ## 3. GitHub OAuth App
 
 GitHub Settings → Developer settings → OAuth Appsでアプリを作成します。
@@ -63,9 +76,34 @@ GitHub Settings → Developer settings → OAuth Appsでアプリを作成しま
 
 OAuthでは公開プロフィールの本人確認だけを行い、`repo`、`user:email` などの追加scopeは要求しません。PKCEとstate、HttpOnly Cookieの照合を行います。ユーザーのOAuthアクセストークンは `/user` の呼び出し後に保持しません。公開コミット取得には運営側の任意の `GITHUB_API_TOKEN` を使います。
 
+### 3-1. OAuth App登録フォームの各設定
+
+`Homepage URL`と`Redirect URI`（Authorization callback URLの入力欄）には、`APP_URL`という文字列そのものではなく実際のURLを入力します。
+
+- ローカル開発用に別のOAuth Appを作る場合: `http://localhost:3000` / `http://localhost:3000/api/github/callback`
+- 本番・Vercelデプロイ用: `https://<実際のVercelドメイン>` / `https://<実際のVercelドメイン>/api/github/callback`
+
+ローカルと本番で`APP_URL`が異なる場合は、別々のOAuth Appを作るか、1つのOAuth Appの`Redirect URI`に両方のcallback URLを追加登録してください（最大10件まで登録可能）。
+
+Redirect URI欄の下にある追加設定は、いずれもデフォルトのままで構いません。
+
+| 設定 | 推奨 | 理由 |
+| --- | --- | --- |
+| Allow wildcard matching | OFF（チェックなし） | callback URLは1つに固定できるため、サブドメイン・パスのワイルドカード許可は不要かつ余計な攻撃面を増やすだけ |
+| Enable Device Flow | OFF（チェックなし） | CLIやスマートTVなどブラウザ操作しにくい端末向けの認可方式。本プロジェクトは通常のブラウザ経由Authorization Code Flow（+PKCE）のみを使うため不要 |
+| Expire user access tokens | ON（チェックあり、デフォルト） | GitHub推奨のデフォルト設定。本プロジェクトは`/user`呼び出し後にアクセストークンを保持しないため有効期限・refresh_tokenの仕組み自体を使う場面はないが、有効にしておいても動作に影響しない |
+
+### 3-2. `GITHUB_API_TOKEN`について
+
+`GITHUB_API_TOKEN`は、各ユーザーが`/niki github`で連携する際のOAuthトークンとは別物で、**運営側（Bot管理者）が任意で用意する1つのトークン**です。宣言の期限後にコミット履歴をGitHub Commit APIで確認する処理（[7章](#7-判定再試行の仕様)）でのみ使います。
+
+- 未設定でも動作しますが、GitHub REST APIは未認証だと1時間あたり60リクエストという制限があり、共有IPのVercel環境では他の利用者と合算ですぐ制限に達しやすくなります。設定すると1時間あたり5,000リクエストまで緩和されます。
+- レート制限に達した場合は「確認エラー」として保留され、判定失敗（未達成）にはなりません（[7章](#7-判定再試行の仕様)）。ただし判定が遅延するため、実運用では設定を推奨します。
+- 必要な権限は公開リポジトリのコミット閲覧のみです。非公開リポジトリへのアクセス権（Classic tokenの`repo`スコープなど）は不要です。運営者自身の [GitHub Personal Access Token](https://github.com/settings/tokens) を、Classic tokenならscopeを何も選択せずに、Fine-grained tokenならpublic repositoryへの読み取りのみで発行し、`GITHUB_API_TOKEN`に設定してください。
+
 ## 4. VercelとDiscord
 
-1. このNext.jsプロジェクトをVercelにデプロイし、`.env.local` と同じサーバー用変数を設定します。`APP_URL` は確定した本番URLにします。GitHub側のcallbackも合わせます。
+1. このNext.jsプロジェクトをVercelにデプロイし、`.env.local` と同じサーバー用変数を設定します。`APP_URL` は確定した本番URLにします。GitHub側のcallbackも合わせます。手動デプロイの詳細手順は [4-2](#4-2-vercelの手動デプロイ) を参照してください。
 2. Discord Developer Portalで **Interactions Endpoint URL** を `APP_URL/api/discord/interactions` に設定します。署名付きPINGに応答します。Gateway接続やMessage Content Intentは不要です。
 3. ローカルから次を実行し、`/niki` を登録します。既存の別コマンドは削除しません。
 
@@ -82,6 +120,91 @@ npm run discord:register
 6. 各ユーザーが `/niki github` を実行し、本人だけに表示されるリンクを開いて「GitHubで連携する」を押し、GitHubを認可します。リンクのプレビュー表示では使用済みになりません。有効期限は発行から10分で、ボタンを押して認可を開始できるのは1回です。別のサーバーで使う場合も、そのサーバーでこの操作を行います。
 
 開発用のguildコマンドからglobalコマンドに切り替える際は、重複表示を避けるため開発用コマンドをDiscord側で整理してください。本スクリプトは他の登録を自動削除しません。
+
+### 4-1. Discord Botの詳細設定
+
+**Bot画面（Developer Portal → Bot）**
+
+- **PUBLIC BOT**: サーバー管理者以外もBotを自サーバーに追加できるようにするかの設定です。運用チーム内だけで使うならOFFのままで構いません。
+- **Privileged Gateway Intents**（PRESENCE INTENT / SERVER MEMBERS INTENT / MESSAGE CONTENT INTENT）: いずれも**有効化不要**です。このBotはDiscordのGateway（常時接続のWebSocket）に接続せず、DiscordがHTTPS経由でInteractions Endpoint URLへ送ってくるWebhook形式のリクエストのみを処理するため、Gateway専用の特権インテントは使いません。
+- Bot Tokenは「Reset Token」を押すと再発行され、旧トークンは即座に無効になります。再発行した場合は`DISCORD_BOT_TOKEN`を更新し、再デプロイしてください。
+
+**Interactions Endpoint URLの検証の仕組み**
+
+Discordは`APP_URL/api/discord/interactions`宛にPOSTするたびに、リクエストヘッダーへEd25519署名(`X-Signature-Ed25519`)とタイムスタンプ(`X-Signature-Timestamp`)を付与します。サーバー側は`discord-interactions`パッケージと`DISCORD_PUBLIC_KEY`を使ってこの署名を検証し、不正なリクエストは拒否します。Developer Portal側でEndpoint URLを保存する際に送られる`PING`（type 1）に対しても、同じ署名検証を通過したうえで`PONG`（type 1）を返す必要があります。署名検証に失敗するURLは保存できません。ローカル開発でこのURLを検証する方法は [docs/localhost-testing.md](./localhost-testing.md) を参照してください。
+
+**Install URLのpermissions値**
+
+`npm run discord:register`実行後に出力されるInstall URLの`permissions=84992`は、以下のDiscord権限ビットの合計です。
+
+| 権限 | ビット値 |
+| --- | --- |
+| チャンネルを見る (View Channel) | 1024 |
+| メッセージを送信 (Send Messages) | 2048 |
+| 埋め込みリンク (Embed Links) | 16384 |
+| メッセージ履歴を読む (Read Message History) | 65536 |
+
+合計 84992。これ以外の権限（メンション全員、メッセージ管理など）は要求しません。招待URLの`scope`は`bot applications.commands`固定です。
+
+**`scripts/register-commands.mjs`の挙動**
+
+- `DISCORD_APPLICATION_ID`と`DISCORD_BOT_TOKEN`を必須で読み、`DISCORD_GUILD_ID`があればguild限定登録、なければglobal登録のエンドポイントにPOSTします。IDは17〜20桁の数字であることを正規表現で検証します。
+- `POST /applications/{id}/(guilds/{guild}/)?commands`は指定した1コマンド(`/niki`)だけを**upsert**するAPIで、他にBotが持つ別コマンドを削除しません。
+- global登録では`contexts`（DM/グループDMでの利用可否）と`integration_types`（サーバー導入かユーザー導入か）をコマンド定義に含めますが、guild限定登録のAPIはこれらのフィールドを受け付けないため、スクリプトが自動的に削除してから送信します。
+- global コマンドの変更はDiscord全体への反映に最大1時間程度かかることがあります。動作確認中は`DISCORD_GUILD_ID`を設定した即時反映のguildコマンドを使うことを推奨します。
+
+### 4-2. Vercelの手動デプロイ
+
+このリポジトリに`vercel.json`は含まれておらず、VercelはNext.jsプロジェクトを自動検出します（Framework Preset: Next.js、Build Command: `next build`、Output: 自動）。追加の設定ファイルは不要です。
+
+**初回セットアップ（ダッシュボード）**
+
+1. [Vercel](https://vercel.com/) にログインし、「Add New... → Project」からこのGitHubリポジトリをImportします。
+2. Project Settings → General → **Node.js Version** を確認します。`package.json`の`engines.node`は`>=22.14.0`を要求するため、Vercel側でも22.x系（利用可能な最新のLTS）を選択してください。デフォルトのまま古いバージョンになっている場合は明示的に変更します。
+3. Project Settings → Environment Variables に、[1章](#1-ローカルの準備)の表と同じ変数（`APP_URL`は本番のVercel URL、`SUPABASE_SERVICE_ROLE_KEY`や`DISCORD_BOT_TOKEN`などの秘密情報を含む）をProduction環境向けに登録します。PreviewやDevelopment環境を使う場合は、開発用のDiscord Bot・GitHub OAuth App・Supabaseプロジェクトを別途用意し、そちらの値を設定してください（本番の秘密情報をPreview環境と共有しない）。
+4. 初回のGit push（またはImport時の初回ビルド）で自動的にデプロイされます。
+
+**GitHub連携によるデプロイ（通常運用）**
+
+デフォルトの連携では、リンクしたブランチ（例: `main`）へのpushやマージのたびに自動でProductionデプロイが実行されます。Pull Requestを作ると、そのブランチ用のPreviewデプロイも自動生成されます。
+
+**再デプロイ（Redeploy）— コードを変更せずに反映し直す場合**
+
+環境変数を追加・変更しただけで、コードの変更なしに再ビルドしたい場合などに使います。
+
+1. Vercelダッシュボードで対象プロジェクトの **Deployments** タブを開きます。
+2. 反映したいデプロイメント（通常は最新のProductionデプロイ）の右側「...」メニューから **Redeploy** を選びます。
+3. 確認ダイアログが出ます。環境変数の変更を反映したい場合は「Use existing Build Cache」の**チェックを外して**再ビルドしてください（ビルドキャッシュを使い回すと、ビルド時にしか読まれない値が古いまま残ることがあります）。実行時にのみ参照される環境変数（このプロジェクトのサーバー用変数は基本的に実行時参照）であればキャッシュ有無に関わらず反映されますが、迷ったらキャッシュなしで再ビルドするのが安全です。
+
+**Vercel CLIによる手動デプロイ**
+
+Gitホスティングを介さずローカルから直接デプロイしたい場合や、開発用の一時的なデプロイを作りたい場合に使えます（[docs/localhost-testing.md](./localhost-testing.md)の「代替案: Vercelに開発/テスト用デプロイを作る」も参照）。
+
+```powershell
+npm install -g vercel
+vercel login
+vercel link          # 初回のみ。既存のVercelプロジェクトと紐付ける
+vercel env pull .env.local   # Vercel側に設定済みの環境変数をローカルへ取得する場合
+```
+
+Preview環境（一時的な検証用URL）へのデプロイ:
+
+```powershell
+vercel
+```
+
+Production環境（`APP_URL`として使う本番ドメイン）への手動デプロイ:
+
+```powershell
+vercel --prod
+```
+
+`vercel --prod`はローカルのソースをそのままVercelへアップロードしてビルド・デプロイします。GitHubへのpushを経由しないため、コミットしていない変更が本番に反映されてしまわないよう注意してください。
+
+**共通の注意点**
+
+- 環境変数を追加・変更した後は、既存のデプロイには自動反映されません。Redeployするか、新しいデプロイをトリガーしてください。
+- Deployment Protection（Vercel Authentication、パスワード保護など）を有効にする場合は、Discord/GitHubから直接叩かれる`/api/discord/interactions`・`/api/github/callback`・Supabase Cronから叩かれる`/api/jobs/evaluate`が保護対象から除外されるよう、Protection Bypass設定やパス単位の除外を行ってください。除外されていないと、これらのエンドポイントが認証で弾かれて機能しなくなります。
 
 ## 5. Supabase Cron
 
