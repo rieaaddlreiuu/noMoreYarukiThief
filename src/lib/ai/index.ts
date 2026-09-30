@@ -1,12 +1,33 @@
 import "server-only";
 import {z} from "zod";
+import {generateWithAnthropic} from "./anthropic";
+import {generateWithGemini} from "./gemini";
+import {generateWithOpenAI} from "./openai";
+
+export {GeminiApiError} from "./gemini";
 
 export type ChangedFile = {filename: string; status: string; additions: number; deletions: number; patch?: string};
 // `files` is set only for commits whose diff was fetched. Merge commits never carry one.
 export type JudgeCandidate = {sha: string; message: string; merge?: boolean; files?: ChangedFile[]};
+// Each provider answers with the verdict as JSON text; checking it against the schema is shared.
+export type VerdictRequest = {apiKey: string; model: string; system: string; user: string; signal: AbortSignal};
 
-export const GeminiApiError = class extends Error {
-    constructor(public status: number) { super(`Gemini API HTTP ${status}`); }
+// Listed in auto-detection order. Gemini comes first so existing deployments keep their judge.
+const providers = {
+    gemini: {keyName: "GEMINI_API_KEY", defaultModel: "gemini-2.5-flash", generate: generateWithGemini},
+    openai: {keyName: "OPENAI_API_KEY", defaultModel: "gpt-6-luna", generate: generateWithOpenAI},
+    anthropic: {keyName: "ANTHROPIC_API_KEY", defaultModel: "claude-opus-5-5", generate: generateWithAnthropic},
+};
+export type AiProvider = keyof typeof providers;
+
+// AI_PROVIDER selects a provider explicitly. Otherwise the first one with an API key is used, or none (AI judgement off).
+export function aiProvider(): AiProvider | null {
+    const selected = process.env.AI_PROVIDER?.trim();
+    if (selected) {
+        if (!Object.hasOwn(providers, selected)) throw new Error(`Unknown AI_PROVIDER: ${selected}`);
+        return selected as AiProvider;
+    }
+    return (Object.keys(providers) as AiProvider[]).find((name) => process.env[providers[name].keyName]?.trim()) ?? null;
 }
 
 // Diff budget for one prompt, sized so the judgement returns well inside the 20-second check timeout.
@@ -61,47 +82,19 @@ export async function judgeCommits(
     candidates: JudgeCandidate[],
     signal: AbortSignal,
 ): Promise<{index: number; reason: string} | null> {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
+    const provider = aiProvider();
+    if (!provider) throw new Error("No AI provider is configured.");
+    const { keyName, defaultModel, generate } = providers[provider];
+    const apiKey = process.env[keyName]?.trim();
+    if (!apiKey) throw new Error(`${keyName} is not configured.`);
 
-    const response = await fetch("https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
-        {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "x-goog-api-key": apiKey,
-            },
-            body: JSON.stringify({
-                systemInstruction: {
-                parts: [{ text: systemInstruction }],
-                },
-                contents: [
-                    { role: "user", parts: [{text: `判定対象のデータ（JSON）:\n${judgeInput(content, candidates)}` }] }
-                ],
-                generationConfig: {
-                    responseMimeType: "application/json",
-                    responseSchema: {
-                        type: "OBJECT",
-                        properties: {
-                            matchedIndex: { type: "INTEGER", nullable: true },
-                            reason: { type: "STRING" },
-                        },
-                        required: ["matchedIndex", "reason"],
-                    },
-                },
-            }),
-            signal,
-            cache: "no-store",
-        },
-    );
-
-    if (!response.ok) {
-        throw new GeminiApiError(response.status);
-    }
-
-    const body = await response.json();
-    const text = body.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (typeof text !== "string") throw new Error("Unexpected Gemini response shape");
+    const text = await generate({
+        apiKey,
+        model: process.env.AI_MODEL?.trim() || defaultModel,
+        system: systemInstruction,
+        user: `判定対象のデータ（JSON）:\n${judgeInput(content, candidates)}`,
+        signal,
+    });
 
     const verdict = z.object({
         matchedIndex: z.number().int().nullable(),

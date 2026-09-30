@@ -1,7 +1,7 @@
 import "server-only";
 import { Octokit } from "@octokit/rest";
 import { z } from "zod";
-import { type ChangedFile, judgeCommits } from "./ai";
+import { aiProvider, type ChangedFile, judgeCommits } from "./ai";
 import { appOrigin, env } from "./config";
 import { type Declaration, UserError } from "./domain";
 
@@ -81,7 +81,7 @@ export async function findQualifyingCommit(declaration: Declaration, signal: Abo
   if (!scanComplete) throw new Error("Commit scan limit reached");
 
   if (candidates.length === 0) return null;
-  if (!process.env.GEMINI_API_KEY) return { sha: candidates[0].sha };
+  if (!aiProvider()) return { sha: candidates[0].sha };
 
   // A merge commit's diff against its first parent can contain other people's work, so it is judged by message only.
   const isMerge = (commit: CommitCandidate) => (commit.parents?.length ?? 0) > 1;

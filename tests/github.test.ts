@@ -2,8 +2,8 @@ import { Octokit } from "@octokit/rest";
 import { describe, expect, it, vi } from "vitest";
 import { declaration } from "./fixtures";
 
-const mocks = vi.hoisted(() => ({ judgeCommits: vi.fn() }));
-vi.mock("../src/lib/ai", () => ({ judgeCommits: mocks.judgeCommits }));
+const mocks = vi.hoisted(() => ({ judgeCommits: vi.fn(), aiProvider: vi.fn() }));
+vi.mock("../src/lib/ai", () => ({ judgeCommits: mocks.judgeCommits, aiProvider: mocks.aiProvider }));
 
 const { findQualifyingCommit, matchesDeclaration, validateRepository } = await import("../src/lib/github");
 
@@ -51,7 +51,7 @@ describe("public GitHub evaluation", () => {
     const query = new URL(String(fetcher.mock.calls.at(-1)![0])).searchParams;
     expect(query.get("sha")).toBe("branch-head");
     expect(query.has("author")).toBe(false);
-    // Without GEMINI_API_KEY no diff is needed, so no per-commit requests are spent.
+    // Without an AI provider no diff is needed, so no per-commit requests are spent.
     expect(fetcher.mock.calls.filter(([url]) => /\/commits\/\w+$/.test(String(url)))).toHaveLength(0);
   });
   it("returns no match only after a complete successful scan", async () => {
@@ -62,10 +62,10 @@ describe("public GitHub evaluation", () => {
     await expect(findQualifyingCommit(row, AbortSignal.timeout(2000), mockedClient(Array.from({ length: 20 }, () => ({ body: [], next: true }))).client)).rejects.toThrow("scan limit");
   });
 
-  describe("AI judgement (GEMINI_API_KEY set)", () => {
+  describe("AI judgement (AI provider configured)", () => {
     const withKey = <T>(fn: () => Promise<T>) => {
-      process.env.GEMINI_API_KEY = "test-key";
-      return fn().finally(() => { delete process.env.GEMINI_API_KEY; });
+      mocks.aiProvider.mockReturnValue("gemini");
+      return fn();
     };
 
     it("adopts the candidate the AI judge selects by index", async () => {
