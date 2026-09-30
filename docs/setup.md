@@ -21,6 +21,7 @@ Copy-Item .env.example .env.local
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth Appの認証情報 |
 | `GITHUB_API_TOKEN` | 任意。公開リポジトリ参照のAPIレート制限を緩和する運営側のトークン。非公開リポジトリ権限は不要。未設定でも動作するが、共有IPの未認証レート制限に達しやすい |
 | `GEMINI_API_KEY` | 任意。コミットメッセージが宣言内容と一致するかをAIで判定する機能を有効化する。未設定なら従来通り「author一致・期限内の最初のコミット」を達成として採用する。[Google AI Studio](https://aistudio.google.com/apikey)で発行できる |
+| `GEMINI_MODEL` | 任意。AI判定に使うGeminiモデル名。未設定なら `gemini-3.8-flash`。モデルが廃止されて404になった場合に差し替える |
 | `SUPABASE_URL` | SupabaseのProject URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabaseのバックエンド用service role key。ブラウザ用のanon keyは使用しない |
 | `CRON_SECRET` | 定期実行APIの認証用。32文字以上のランダムな値 |
