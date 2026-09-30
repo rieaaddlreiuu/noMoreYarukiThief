@@ -21,13 +21,17 @@ it("matches the linked author ID and inclusive committer-time bounds", () => {
   expect(matchesDeclaration({ ...candidate(row.deadline), author: null }, row)).toBe(false);
 });
 
-function mockedClient(commitPages: { body: unknown; status?: number; next?: boolean }[], privateRepo = false) {
+const defaultDetail = (sha: string) => Response.json({ sha, files: [{ filename: "src/login.tsx", status: "added", additions: 1, deletions: 0, patch: `+// ${sha}` }] });
+
+function mockedClient(commitPages: { body: unknown; status?: number; next?: boolean }[], privateRepo = false, detail = defaultDetail) {
   const fetcher = vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/commits?")) {
       const page = commitPages.shift()!;
       return Response.json(page.body, { status: page.status ?? 200, headers: page.next ? { link: '<https://api.github.com/repos/owner/repository/commits?page=2>; rel="next"' } : {} });
     }
+    const commit = /\/commits\/(\w+)$/.exec(url);
+    if (commit) return detail(commit[1]);
     if (url.includes("/branches/")) return Response.json({ name: "main", commit: { sha: "branch-head" } });
     return Response.json({ private: privateRepo, full_name: "owner/repository", default_branch: "main" });
   });
@@ -47,6 +51,8 @@ describe("public GitHub evaluation", () => {
     const query = new URL(String(fetcher.mock.calls.at(-1)![0])).searchParams;
     expect(query.get("sha")).toBe("branch-head");
     expect(query.has("author")).toBe(false);
+    // Without GEMINI_API_KEY no diff is needed, so no per-commit requests are spent.
+    expect(fetcher.mock.calls.filter(([url]) => /\/commits\/\w+$/.test(String(url)))).toHaveLength(0);
   });
   it("returns no match only after a complete successful scan", async () => {
     const row = declaration();
@@ -82,6 +88,34 @@ describe("public GitHub evaluation", () => {
       mocks.judgeCommits.mockRejectedValueOnce(new Error("Gemini API HTTP 500"));
       const { client } = mockedClient([{ body: [candidate(row.deadline)] }]);
       await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client))).rejects.toThrow();
+    });
+
+    it("passes the diffs of the newest non-merge candidates to the AI judge", async () => {
+      const row = declaration();
+      mocks.judgeCommits.mockResolvedValueOnce(null);
+      const sha = (i: number) => i.toString(16).padStart(40, "0");
+      const merge = { ...candidate(row.deadline, 1234, sha(99), "Merge branch 'main'"), parents: [{ sha: "p1" }, { sha: "p2" }] };
+      const commits = [merge, ...Array.from({ length: 12 }, (_, i) => candidate(row.deadline, 1234, sha(i), `commit ${i}`))];
+      const { client, fetcher } = mockedClient([{ body: commits }]);
+      await withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client));
+
+      const fetched = fetcher.mock.calls.map(([url]) => /\/commits\/(\w+)$/.exec(String(url))?.[1]).filter(Boolean);
+      expect(fetched).toEqual(Array.from({ length: 10 }, (_, i) => sha(i)));
+      const [content, judged] = mocks.judgeCommits.mock.calls[0];
+      expect(content).toBe(row.content);
+      expect(judged).toHaveLength(13);
+      expect(judged[0]).toEqual({ sha: sha(99).slice(0, 7), message: "Merge branch 'main'", merge: true, files: undefined });
+      expect(judged[1]).toEqual({ sha: sha(0).slice(0, 7), message: "commit 0", merge: false,
+        files: [{ filename: "src/login.tsx", status: "added", additions: 1, deletions: 0, patch: `+// ${sha(0)}` }] });
+      expect(judged[11].files).toBeUndefined();
+      expect(judged[12].files).toBeUndefined();
+    });
+
+    it("retries instead of judging when a diff cannot be fetched", async () => {
+      const row = declaration();
+      const { client } = mockedClient([{ body: [candidate(row.deadline)] }], false, () => Response.json({ message: "Server Error" }, { status: 502 }));
+      await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client))).rejects.toThrow();
+      expect(mocks.judgeCommits).not.toHaveBeenCalled();
     });
 
     it("never calls the AI judge when there are no candidates", async () => {
