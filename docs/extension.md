@@ -12,9 +12,9 @@
 
 ---
 
-## 1. コミットメッセージをAIが読んで、宣言を達成したか判断する
+## 1. コミットの中身をAIが読んで、宣言を達成したか判断する
 
-> **ステータス: 実装済み** — 以下の仕様・処理フローに沿って実装しました。「実装方針」の表に実際の変更ファイルへのリンクを反映済みです。
+> **ステータス: 実装済み** — 以下の仕様・処理フローに沿って実装しました。「実装方針」の表に実際の変更ファイルへのリンクを反映済みです。当初はコミットメッセージのみを判定材料にしていましたが、メッセージだけ宣言に合わせたコミット（空コミットや無関係な変更）を見抜けないため、変更差分も読むように拡張しました。
 
 ### 課題
 
@@ -22,8 +22,11 @@
 
 ### 仕様
 
-- 判定材料は**コミットメッセージのみ**（diffは見ない。追加のGitHub API呼び出し・トークンコスト・無関係な変更の混入リスクを避けるため）
-- `GEMINI_API_KEY`が設定されている場合だけAI判定を有効化。未設定なら現状通り「author+期間一致の最初の1件」を採用する
+- 判定材料は**コミットメッセージと変更差分**。差分は1件ごとにGitHub APIの呼び出しが必要なため、**新しい順に最大10件**（マージコミットを除く）だけ取得し、残りの候補はメッセージのみで判定する
+- マージコミットは親（first parent）との差分に他人の変更が混ざりうるため、差分を取得せずメッセージのみで判定する
+- 差分は1ファイル2,000文字・1コミット8,000文字・全体40,000文字で打ち切り、ロックファイル・minifyされたファイル・sourcemapは差分を省略する（ファイル名と増減行数は渡す）。判定がチェック1件あたりの20秒の時間枠に収まるようにするため
+- AIのAPIキー（`GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY`）のいずれかが設定されている場合だけAI判定を有効化。未設定なら現状通り「author+期間一致の最初の1件」を採用する
+- プロバイダーはGemini・OpenAI（ChatGPT）・Anthropic（Claude）から選べる。`AI_PROVIDER`で明示でき、未設定ならキーのあるものをGemini → OpenAI → Anthropicの順で使う（既存のGemini利用環境の挙動を変えないため）。`AI_MODEL`で既定モデルを上書きできる
 - AI呼び出しはコミット候補ごとではなく、**候補一覧をまとめて1回**で判定する（Cronの40秒バジェットに収まりやすくするため）
 
 ### 処理フロー
@@ -31,9 +34,11 @@
 ```
 ① 対象ブランチのコミット履歴を、宣言登録時刻〜期限の範囲で全ページ取得（既存のまま、最大2,000件）
 ② author id が一致するコミットを候補として全件集める（現状は最初の1件で打ち切っている部分を変更）
-③ GEMINI_API_KEY 未設定 → 候補先頭のshaを返す（現状と同じ挙動）
-④ GEMINI_API_KEY 設定済み・候補あり →
-   候補の (sha短縮形, message) 一覧と宣言内容(content)をまとめてGeminiに送り、
+③ AIのAPIキー未設定 → 候補先頭のshaを返す（現状と同じ挙動）
+④ AIのAPIキー設定済み・候補あり →
+   マージコミット以外の新しい候補から最大10件、GET /repos/{owner}/{repo}/commits/{sha} で変更ファイルと差分を並列取得
+   （取得失敗は「確認エラー」として再試行。少ない材料で判定しない）
+   候補の (sha短縮形, message, 差分) 一覧と宣言内容(content)をJSONにまとめて選択中のAIに送り、
    「一致した候補のindex（またはnull）＋簡潔な理由」を構造化JSON(responseSchema)で受け取る
    → indexが候補配列の範囲内かを検証してから採用する（LLM出力を無条件に信用しない）
    → 一致なしと判定されたら「未達成」に倒す
@@ -43,20 +48,23 @@
 
 | 変更対象 | 内容 |
 | --- | --- |
-| 新規 [ai.ts](src/lib/ai.ts) | `judgeCommits(content, candidates, signal)` を実装。[client.ts](src/lib/discord/client.ts)と同様、SDKを追加せず`fetch`でGemini REST APIを叩く。レスポンスは`z.object({ matchedIndex: z.number().int().nullable(), reason: z.string().max(200) })`で検証し、範囲外indexは`null`扱いにする |
-| [github.ts](src/lib/github.ts) | `CommitCandidate`に`commit.message`を追加。`findQualifyingCommit`を「全候補収集→分岐」に変更し、戻り値を`{ sha: string; aiReason?: string } \| null`に変更。ページ走査未完了チェックはAI判定より先に行う |
+| 新規 [ai/index.ts](src/lib/ai/index.ts) | `judgeCommits(content, candidates, signal)` と、使うプロバイダーを決める`aiProvider()`を実装。判定データは`judgeInput()`でJSON化し（差分の文字数上限・生成ファイル省略もここで行う）、システム指示とは分けて送る。レスポンスは`z.object({ matchedIndex: z.number().int().nullable(), reason: z.string() })`で検証し、`reason`は200文字に切り詰め、範囲外indexは`null`扱いにする。システム指示・判定データ・結果の検証は全プロバイダー共通 |
+| 新規 [ai/gemini.ts](src/lib/ai/gemini.ts)・[ai/openai.ts](src/lib/ai/openai.ts)・[ai/anthropic.ts](src/lib/ai/anthropic.ts) | 各社APIの呼び出し。Geminiは[client.ts](src/lib/discord/client.ts)と同様SDKを追加せず`fetch`でREST APIを叩く。OpenAIは公式SDK（`openai`）のResponses APIで`text.format`（strictなJSON Schema）・`store: false`・`reasoning.effort: "low"`を指定。Anthropicは公式SDK（`@anthropic-ai/sdk`）で`output_config.format`（JSON Schema）・`effort: "low"`・`fallbacks: "default"`（ベータ`server-side-fallback-2026-07-01`）を指定。拒否・打ち切り・未完了の応答は判定結果として扱わず例外にする。SDKの自動リトライは切り、再試行はジョブキューに任せる |
+| [github.ts](src/lib/github.ts) | `CommitCandidate`に`commit.message`と`parents`を追加。`findQualifyingCommit`を「全候補収集→分岐」に変更し、戻り値を`{ sha: string; aiReason?: string } \| null`に変更。ページ走査未完了チェックはAI判定より先に行う。AI判定前に、マージ以外の新しい候補最大10件の差分を`repos.getCommit`で取得する |
 | 新規 [202609300001_ai_judgement.sql](supabase/migrations/202609300001_ai_judgement.sql) | `declarations`に`ai_reason text`（nullable、500文字以内のcheck制約）列を追加。`niki_finish_check(uuid,uuid,text)`を`drop function`し、`p_ai_reason`引数を追加した新シグネチャで再作成。新シグネチャに対して`revoke`/`grant`（`service_role`のみ許可）をやり直す |
 | [store.ts](src/lib/store.ts) | `finishCheck(row, sha, aiReason?)`に対応 |
-| [jobs.ts](src/lib/jobs.ts) | `checkOne`の呼び出しを新しい戻り値の形に合わせて更新。Gemini呼び出しの例外は既存の`retryCheck`経路にそのまま乗る（未達成にしない） |
+| [jobs.ts](src/lib/jobs.ts) | `checkOne`の呼び出しを新しい戻り値の形に合わせて更新。AI呼び出しの例外は既存の`retryCheck`経路にそのまま乗る（未達成にしない） |
 | [messages.ts](src/lib/discord/messages.ts) | `notificationMessage()`の`result`かつ未達成のケースで、`d.ai_reason`があれば「AIの判定理由」フィールドを追加表示（`discordText()`でエスケープ） |
-| `.env.example` / [docs/setup.md](docs/setup.md) | `GEMINI_API_KEY`（任意）を追記。未設定時は従来通りと明記。マイグレーション適用順序（コードデプロイより先に適用）も明記 |
+| `.env.example` / [docs/setup.md](docs/setup.md) | `GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `AI_PROVIDER` / `AI_MODEL`（いずれも任意）を追記。未設定時は従来通りと明記。マイグレーション適用順序（コードデプロイより先に適用）も明記 |
 | [tests/ai.test.ts](tests/ai.test.ts)・[tests/github.test.ts](tests/github.test.ts)・[tests/database.test.ts](tests/database.test.ts)・[tests/domain.test.ts](tests/domain.test.ts) | 正常系・HTTPエラー・スキーマ不正・APIキー未設定・PGliteでの新マイグレーション適用と権限・Discord表示のエスケープを検証 |
 
 ### 検討事項
 
-- **プロンプトインジェクション**: `content`（宣言者入力）も`commit.message`（コミット作者入力）も信頼できない外部入力。システム指示とデータを明確に分離し、構造化出力を強制する。`reason`はDiscord表示前に必ずエスケープする（対応済み）
-- **候補が多い宣言**: コミット数が多いと、まとめて渡すプロンプトが長くなる。候補数の上限（例: 先頭50件など）は**未実装**。運用で問題が出た場合に追加検討する
-- **判定基準のブレ**: 「宣言内容とコミットメッセージが一致する」の粒度をAIがどう解釈するかは実行のたびに揺れうる。厳密な採点基準ではなく「明らかに無関係な変更でなければ許容する」程度の緩い基準にする方が、誤って未達成にする事故を避けやすい（システムプロンプトの調整余地として残る）
+- **プロンプトインジェクション**: `content`（宣言者入力）も`commit.message`・差分（コミット作者入力。コード中のコメントも含む）も信頼できない外部入力。データはJSON文字列としてシステム指示と分けて渡し、メッセージや差分の中身で候補の区切りを偽装できないようにしている。システム指示でデータ中の指示文に従わないよう明示し、構造化出力を強制する。`reason`はDiscord表示前に必ずエスケープする（対応済み）。ただし宣言者本人が自分の宣言を「達成」に見せかける改ざん（差分にそれらしいコードを足す等）は、自己申告型のツールである以上完全には防げない
+- **候補が多い宣言**: コミット数が多いと、まとめて渡すプロンプトが長くなる。差分は上記の上限で抑えているが、メッセージのみの候補数の上限（例: 先頭50件など）は**未実装**。運用で問題が出た場合に追加検討する
+- **GitHub APIの消費**: 差分取得で1判定あたり最大10リクエスト増える。`GITHUB_API_TOKEN`未設定（未認証60回/時）では数件の判定でレート制限に達しうるため、AI判定を使う場合はトークンの設定を推奨する
+- **レイテンシ**: 差分を含めるとプロンプトが数万文字になり、AIの応答時間が伸びる。チェック1件の時間枠（20秒）を超えると確認エラーとして再試行されるため、頻発する場合は差分の文字数上限か取得件数を下げる
+- **判定基準のブレ**: 「宣言内容に向けた作業か」の粒度をAIがどう解釈するかは実行のたびに揺れうる。厳密な採点基準ではなく「明らかに無関係な変更でなければ許容する」程度の緩い基準をシステムプロンプトで指示している（差分が空・形だけの場合は達成の根拠にしない）
 
 ---
 
@@ -132,7 +140,7 @@ const line = row.kind === "declared" ? "宣言、受け取ったで。コミッ�
 
 | 変更対象 | 内容 |
 | --- | --- |
-| [ai.ts](#1-コミットメッセージをaiが読んで宣言を達成したか判断する)（1番と共通化） | `generateTauntLine(context, signal): Promise<string>` を追加。失敗時は`null`を返す（例外を投げて呼び出し元を止めない設計にする） |
+| [ai.ts](#1-コミットの中身をaiが読んで宣言を達成したか判断する)（1番と共通化） | `generateTauntLine(context, signal): Promise<string>` を追加。失敗時は`null`を返す（例外を投げて呼び出し元を止めない設計にする） |
 | [messages.ts](src/lib/discord/messages.ts) | `notificationMessage()`を`async`化し、`generateTauntLine`の結果があれば使う、なければ既存の`line`定数にフォールバックする分岐を追加 |
 | 呼び出し元（[route.ts](src/app/api/discord/interactions/route.ts)の`processInteraction`、[jobs.ts](src/lib/jobs.ts)の`notifyOne`） | `notificationMessage`が非同期になることに伴う型・await の追従 |
 

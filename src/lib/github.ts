@@ -1,7 +1,7 @@
 import "server-only";
 import { Octokit } from "@octokit/rest";
 import { z } from "zod";
-import { judgeCommits } from "./ai";
+import { aiProvider, type ChangedFile, judgeCommits } from "./ai";
 import { appOrigin, env } from "./config";
 import { type Declaration, UserError } from "./domain";
 
@@ -37,14 +37,23 @@ export async function validateRepository(repository: string, branch?: string, cl
 export type CommitCandidate = {
   sha: string;
   author: { id?: number } | null;
+  parents?: { sha: string }[];
   commit: { committer: { date?: string } | null; message: string };
 };
+
+// Each diff costs one GitHub request, so only the newest candidates are read in full; the rest are judged by message.
+const DIFF_COMMIT_LIMIT = 10;
 
 export function matchesDeclaration(commit: CommitCandidate, declaration: Declaration) {
   if (commit.author?.id !== declaration.github_id) return false;
   const date = Date.parse(commit.commit.committer?.date ?? "");
   if (!Number.isFinite(date)) throw new Error("Missing commit timestamp");
   return date >= Date.parse(declaration.created_at) && date <= Date.parse(declaration.deadline);
+}
+
+async function commitFiles(client: Octokit, owner: string, repo: string, ref: string, signal: AbortSignal): Promise<ChangedFile[]> {
+  const { data } = await client.repos.getCommit({ owner, repo, ref, headers, request: { signal } });
+  return (data.files ?? []).map(({ filename, status, additions, deletions, patch }) => ({ filename, status, additions, deletions, patch }));
 }
 
 export async function findQualifyingCommit(declaration: Declaration, signal: AbortSignal, client = githubClient()): Promise<{ sha: string; aiReason?: string } | null> {
@@ -72,13 +81,17 @@ export async function findQualifyingCommit(declaration: Declaration, signal: Abo
   if (!scanComplete) throw new Error("Commit scan limit reached");
 
   if (candidates.length === 0) return null;
-  if (!process.env.GEMINI_API_KEY) return { sha: candidates[0].sha };
+  if (!aiProvider()) return { sha: candidates[0].sha };
 
-  const verdict = await judgeCommits(
-    declaration.content,
-    candidates.map((c) => ({ sha: c.sha.slice(0, 7), message: c.commit.message })),
-    signal,
-  );
+  // A merge commit's diff against its first parent can contain other people's work, so it is judged by message only.
+  const isMerge = (commit: CommitCandidate) => (commit.parents?.length ?? 0) > 1;
+  const diffTargets = new Set(candidates.filter((commit) => !isMerge(commit)).slice(0, DIFF_COMMIT_LIMIT));
+  // A failed diff fetch throws like any other GitHub error, so the check is retried rather than judged on less evidence.
+  const judged = await Promise.all(candidates.map(async (commit) => ({
+    sha: commit.sha.slice(0, 7), message: commit.commit.message, merge: isMerge(commit),
+    files: diffTargets.has(commit) ? await commitFiles(client, owner, repo, commit.sha, signal) : undefined,
+  })));
+  const verdict = await judgeCommits(declaration.content, judged, signal);
   if (!verdict) return null;
   return { sha: candidates[verdict.index].sha, aiReason: verdict.reason };
 }

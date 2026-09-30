@@ -20,7 +20,9 @@ Copy-Item .env.example .env.local
 | `DISCORD_GUILD_ID` | 開発用サーバーID。指定するとコマンドをそのサーバーだけに登録。全体公開時は省略 |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth Appの認証情報 |
 | `GITHUB_API_TOKEN` | 任意。公開リポジトリ参照のAPIレート制限を緩和する運営側のトークン。非公開リポジトリ権限は不要。未設定でも動作するが、共有IPの未認証レート制限に達しやすい |
-| `GEMINI_API_KEY` | 任意。コミットメッセージが宣言内容と一致するかをAIで判定する機能を有効化する。未設定なら従来通り「author一致・期限内の最初のコミット」を達成として採用する。[Google AI Studio](https://aistudio.google.com/apikey)で発行できる |
+| `GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` | 任意。いずれか1つを設定すると、コミットの中身（メッセージと変更差分）が宣言内容を達成しているかをAIで判定する機能を有効化する。Gemini・ChatGPT（OpenAI）・Claude（Anthropic）のどれでも動く。すべて未設定なら従来通り「author一致・期限内の最初のコミット」を達成として採用する。差分の取得でGitHub APIの呼び出しが1判定あたり最大10回増えるため、`GITHUB_API_TOKEN`の併用を推奨。キーは[Google AI Studio](https://aistudio.google.com/apikey)・[OpenAI Platform](https://platform.openai.com/api-keys)・[Claude Console](https://platform.claude.com/settings/keys)で発行できる |
+| `AI_PROVIDER` | 任意。`gemini` / `openai` / `anthropic` のどれを使うかを明示する。複数のキーを設定したときだけ必要。未設定ならキーが設定されているものを Gemini → OpenAI → Anthropic の順で探して使う |
+| `AI_MODEL` | 任意。使うモデルを変更する。未設定時の既定は Gemini が `gemini-2.5-flash`、OpenAI が `gpt-6-luna`、Anthropic が `claude-opus-5-5`。OpenAIでは推論effort（`reasoning.effort`）、Anthropicではeffort（`output_config.effort`）と構造化出力に対応したモデルを指定すること |
 | `SUPABASE_URL` | SupabaseのProject URL |
 | `SUPABASE_SERVICE_ROLE_KEY` | Supabaseのバックエンド用service role key。ブラウザ用のanon keyは使用しない |
 | `CRON_SECRET` | 定期実行APIの認証用。32文字以上のランダムな値 |
@@ -264,7 +266,14 @@ node --env-file=.env.local --input-type=module -e "const r = await fetch(process
 
 GitHubの404・403・レート制限・通信障害、リポジトリの非公開化、ブランチ削除、走査上限到達は「確認エラー」として保留します。正常な取得が最後まで完了し、一致がない場合だけ未達成です。1回のコミット走査は最大2,000件で、それ以上なら未達成にはしません。通常は小さい開発チーム向けの範囲です。
 
-`GEMINI_API_KEY` が設定されている場合は、author・期間が一致するコミット候補が複数あるとき、コミットメッセージの内容が宣言内容と対応するものだけを達成と判定します（無関係な候補しかなければ未達成）。判定理由は結果通知に表示されます。AI呼び出し自体の失敗（HTTPエラー・レスポンス不正など）は未達成にはせず「確認エラー」として保留・再試行します。未設定の場合は従来通り、候補の先頭1件をそのまま採用します。
+AIのAPIキー（`GEMINI_API_KEY` / `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` のいずれか）が設定されている場合は、author・期間が一致するコミット候補の中身をAIが読み、宣言内容に向けた実質的な作業をしているコミットがあるときだけ達成と判定します（無関係な候補しかなければ未達成）。判定理由は結果通知に表示されます。未設定の場合は従来通り、候補の先頭1件をそのまま採用します。
+
+- AIに渡すのは、全候補のコミットメッセージと、**新しい順に最大10件**（マージコミットを除く）の変更差分です。差分があるコミットは差分を最も重視するため、メッセージだけ宣言に合わせた空コミットや無関係な変更は達成の根拠になりません。
+- マージコミットは親との差分に他人の変更が混ざりうるため、差分を読まずメッセージだけで判断します。11件目以降の候補もメッセージだけで判断します。
+- 1ファイル2,000文字・1コミット8,000文字・全体40,000文字を超える差分と、ロックファイル・minifyされたファイル・sourcemapの差分は省略して送ります（ファイル名と増減行数は送ります）。
+- 差分の取得失敗やAI呼び出し自体の失敗（HTTPエラー・レスポンス不正など）は未達成にはせず「確認エラー」として保留・再試行します。
+- 差分は公開リポジトリの内容ですが、選んだAIのAPI（Gemini / OpenAI / Anthropic）へ送信されます。OpenAIには`store: false`を指定し、リクエスト内容をOpenAI側に保存させません。
+- 判定の速さを優先し、OpenAIでは推論effortを`low`、Anthropicではeffortを`low`にしています。Anthropicでは安全性判定で拒否された場合に推奨モデルでサーバー側が自動で再実行する`fallbacks: "default"`（ベータ）を有効にしています。それでも拒否された場合は「確認エラー」として再試行します。
 
 判定と通知は別々のキューを持ちます。DBの行ロック、期限付きの実行権限、トランザクションで重複実行を防ぎます。実行が途中で止まっても2分後に再取得でき、次回Cronで処理されます。通常のエラーは1分から最大1時間の待ち時間で再試行し、APIが明示するレート制限の待ち時間も反映します。実際の再試行は5分間隔のCronに合わせて行われます。
 
@@ -298,12 +307,13 @@ npm run build
 
 実サービスでの受入確認には、環境変数設定・DB適用・Bot導入・Cron登録が必要です。
 
-`GEMINI_API_KEY`を設定してAI判定を使う場合は、追加で次を確認します。
+AIのAPIキーを設定してAI判定を使う場合は、使うプロバイダーごとに追加で次を確認します。
 
-1. `GEMINI_API_KEY`設定済み・宣言内容と無関係なコミットメッセージ → 未達成になり、結果通知に「AIの判定理由」フィールドが表示される。
-2. `GEMINI_API_KEY`設定済み・宣言内容と対応するコミットメッセージ → 達成になる。
-3. `GEMINI_API_KEY`を外して同じ手順を実行 → 従来通り、author・期間が一致する最初のコミットで達成判定される（フォールバック確認）。
-4. `GEMINI_API_KEY`を無効な値にして呼び出し失敗を起こす → 宣言が`pending`のまま保留・再試行され、`declarations.last_check_error`に`safeError()`経由の文字列（秘密情報を含まない）が記録される。
+1. キー設定済み・宣言内容と無関係なコミットメッセージ → 未達成になり、結果通知に「AIの判定理由」フィールドが表示される。
+2. キー設定済み・宣言内容と対応するコミットメッセージと差分 → 達成になる。
+3. キー設定済み・メッセージだけ宣言内容に合わせた空コミット（`git commit --allow-empty`）→ 未達成になる。
+4. AIのキーをすべて外して同じ手順を実行 → 従来通り、author・期間が一致する最初のコミットで達成判定される（フォールバック確認）。
+5. キーを無効な値にして呼び出し失敗を起こす → 宣言が`pending`のまま保留・再試行され、`declarations.last_check_error`に`safeError()`経由の文字列（秘密情報を含まない）が記録される。
 
 ## 参照したAPI仕様
 
