@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { declarationInput, discordText, formatJst, parseDeadline, snowflake, UserError } from "../domain";
+import { declarationInput, discordText, formatJst, snowflake, UserError } from "../domain";
+import { DeadlineInputError, parseDeadline } from "../deadline";
 import type { Store } from "../store";
 import { hashToken, randomToken } from "../security";
 import type { DiscordClient } from "./client";
@@ -65,6 +66,7 @@ export async function handleCommand(interaction: Interaction, deps: CommandDepen
 }
 
 export function commandErrorMessage(error: unknown): string {
+  if (error instanceof DeadlineInputError) return error.message;
   if (error instanceof UserError) return error.message;
   if (error instanceof z.ZodError) return "入力形式が正しくありません。内容・owner/repository・日本時間の期限（YYYY-MM-DD HH:mm）を確認してください。";
   return "処理を完了できませんでした。/niki status で保存状況を確認し、時間をおいて再実行してください。";

@@ -9,7 +9,7 @@ export const nikiCommand = {
     { type: 1, name: "declare", description: "開発内容と期限を宣言する", options: [
       { type: 3, name: "content", description: "何を開発するか", required: true, min_length: 1, max_length: 500 },
       { type: 3, name: "repository", description: "公開リポジトリ（owner/repository）", required: true, max_length: 140 },
-      { type: 3, name: "deadline", description: "日本時間の期限（例: 2026-09-28 22:00）", required: true, min_length: 16, max_length: 16 },
+      { type: 3, name: "deadline", description: "日本時間の期限。例: 23時 / 明日 9時 / 3時間後 / 10/5 21:00 / YYYY-MM-DD HH:mm", required: true, min_length: 1, max_length: 100 },
       { type: 3, name: "branch", description: "対象ブランチ（省略時は現在のデフォルトブランチ）", max_length: 255 },
     ] },
     { type: 1, name: "cancel", description: "自分の期限前の宣言を取り消す" },

@@ -62,18 +62,7 @@ export function jstDay(value: string | Date) {
   return new Date(new Date(value).getTime() + 9 * 60 * 60 * 1000).toISOString().slice(0, 10);
 }
 
-export function parseDeadline(value: string, now = new Date()) {
-  const match = /^(20\d{2})-(\d{2})-(\d{2}) (\d{2}):(\d{2})$/.exec(value.trim());
-  if (!match) throw new UserError("期限は日本時間で YYYY-MM-DD HH:mm と入力してください。");
-  const [, year, month, day, hour, minute] = match.map(Number);
-  const utc = Date.UTC(year, month - 1, day, hour - 9, minute);
-  const result = new Date(utc);
-  if (jstDateTime.format(result) !== value.trim()) {
-    throw new UserError("期限の日付・時刻が存在しません。");
-  }
-  if (utc <= now.getTime()) throw new UserError("期限は現在より後に設定してください。");
-  return result.toISOString();
-}
+export { parseDeadline } from "./deadline";
 
 export const declarationInput = z.object({
   content: z.string().trim().min(1, "宣言の内容を入力してください。").max(500),

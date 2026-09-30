@@ -5,13 +5,13 @@ import { applicationId, discordId, guildId } from "./fixtures";
 
 const mocks = vi.hoisted(() => ({
   after: vi.fn(), createStore: vi.fn(), cleanup: vi.fn(), beginOAuth: vi.fn(), consumeOAuth: vi.fn(), linkGitHub: vi.fn(),
-  exchangeGitHubCode: vi.fn(), assertMember: vi.fn(), runJobs: vi.fn(),
+  exchangeGitHubCode: vi.fn(), assertMember: vi.fn(), runJobs: vi.fn(), editReply: vi.fn(),
 }));
 vi.mock("next/server", async (importOriginal) => ({ ...await importOriginal<typeof import("next/server")>(), after: mocks.after }));
 vi.mock("../src/lib/store", () => ({ createStore: mocks.createStore }));
 vi.mock("../src/lib/github", () => ({ validateRepository: vi.fn(), findQualifyingCommit: vi.fn(), exchangeGitHubCode: mocks.exchangeGitHubCode }));
 vi.mock("../src/lib/jobs", () => ({ runJobs: mocks.runJobs, dispatchNotifications: vi.fn() }));
-vi.mock("../src/lib/discord/client", () => ({ createDiscordClient: () => ({ assertMember: mocks.assertMember, deliver: vi.fn() }) }));
+vi.mock("../src/lib/discord/client", () => ({ createDiscordClient: () => ({ assertMember: mocks.assertMember, deliver: vi.fn(), editReply: mocks.editReply }) }));
 
 import { POST as discordPost } from "../src/app/api/discord/interactions/route";
 import { POST as jobsPost } from "../src/app/api/jobs/evaluate/route";
@@ -27,7 +27,7 @@ beforeEach(() => {
   vi.stubEnv("GITHUB_CLIENT_ID", "test-client");
   vi.stubEnv("GITHUB_CLIENT_SECRET", "test-secret");
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => { vi.unstubAllEnvs(); vi.useRealTimers(); });
 
 const { publicKey, privateKey } = generateKeyPairSync("ed25519");
 function signedRequest(payload: unknown) {
@@ -40,6 +40,26 @@ function signedRequest(payload: unknown) {
 }
 
 describe("Discord HTTP entry point", () => {
+  it.each(["5分後", "40日後", "今日 19時", "9/30", "25時", "2026-02-30 23:00", "そのうち", ""])("replies privately with examples for invalid deadline: %s", async (deadline) => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-01T11:00:00Z"));
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const createDeclaration = vi.fn();
+    mocks.createStore.mockReturnValue({ claimInteraction: vi.fn().mockResolvedValue(true), requireSetup: vi.fn(), requireMember: vi.fn(), createDeclaration });
+    mocks.editReply.mockResolvedValue(undefined);
+    const payload = { id: "500000000000000001", application_id: applicationId, type: 2, token: "test", guild_id: guildId,
+      member: { user: { id: discordId }, permissions: "0" }, data: { name: "niki", options: [{ type: 1, name: "declare",
+        options: Object.entries({ content: "開発", repository: "owner/repository", deadline }).map(([name, value]) => ({ name, value, type: 3 })),
+      }] } };
+    expect(await (await discordPost(signedRequest(payload))).json()).toEqual({ type: 5, data: { flags: 64 } });
+    await mocks.after.mock.calls[0][0]();
+    expect(mocks.editReply).toHaveBeenCalledOnce();
+    const [app, token, message] = mocks.editReply.mock.calls[0];
+    expect([app, token]).toEqual([applicationId, "test"]);
+    expect(message.content.split("例: ")[0].length).toBeGreaterThan(1);
+    expect(message.content.split("例: ")[1].split(" / ").length).toBeGreaterThanOrEqual(3);
+    expect(createDeclaration).not.toHaveBeenCalled();
+  });
   it("handles signed PING without a database or bot token", async () => {
     expect(await (await discordPost(signedRequest({ type: 1 }))).json()).toEqual({ type: 1 });
     expect(mocks.createStore).not.toHaveBeenCalled();
