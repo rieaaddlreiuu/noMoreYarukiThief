@@ -56,6 +56,9 @@ export function createStore() {
       const row = await query<{ discord_id: string } | null>(db.from("memberships").select("discord_id").eq("guild_id", guildId).eq("discord_id", discordId).eq("active", true).maybeSingle());
       if (!row) throw new UserError("このサーバーで /niki github を実行してGitHubを連携してください。");
     },
+    async setNotifyChannel(guildId: string, discordId: string, channelId: string | null) {
+      await rpc("niki_set_notify_channel", { p_guild_id: guildId, p_discord_id: discordId, p_channel_id: channelId });
+    },
     async issueOAuth(ticketHash: string, guildId: string, discordId: string) {
       await query(db.from("oauth_sessions").insert({ ticket_hash: ticketHash, guild_id: guildId, discord_id: discordId }));
     },

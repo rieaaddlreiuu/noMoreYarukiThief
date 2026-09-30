@@ -236,6 +236,8 @@ node --env-file=.env.local --input-type=module -e "const r = await fetch(process
 /niki setup channel:#開発記録
 /niki github
 /niki declare content:ログイン画面を実装する repository:owner/repository deadline:2026-09-28 22:00 branch:feature/login
+/niki notify
+/niki notify reset:true
 /niki cancel
 /niki status
 /niki status page:2
@@ -269,6 +271,8 @@ GitHubの404・403・レート制限・通信障害、リポジトリの非公�
 Discord送信には固定nonceを使用し、再試行時にはBot自身の投稿の記録IDを履歴から照合します。送信後にDB更新が失敗した場合も、見つかった投稿を送信済みとして記録します。過去の通知を手動削除した場合は再送される可能性があります。履歴権限がない場合や1,000件の履歴走査で安全に確認できない場合は、重複投稿を避けるため通知を保留します。この場合は管理者が `notifications.last_error` と対象チャンネルを確認してください。
 
 通知先は通知の予約時に固定します。`/niki setup` で通知先を変えても、予約済み通知は元のチャンネルへ送ります。元のチャンネルを削除した場合は、DBで保留中通知の `channel_id` を修正する必要があります。
+
+`/niki notify` を実行したチャンネルは、自分の宣言・取消・結果通知の**追加の通知先**になります。サーバー既定チャンネルにも従来どおり同じ通知が投稿されるため、チーム全体への公開は保たれます（個人チャンネルが既定と同じ場合は1件のみ）。`/niki notify reset:true` で解除できます。通知先は予約時に固定されるため、変更後に作成される通知から反映されます。実行するチャンネルはサーバーの通常のテキストチャンネルで、Botの投稿権限が必要です。個人チャンネルへの投稿が失敗して再試行中でも、既定チャンネルへの投稿は止まりません。個人チャンネルを削除した場合は、`/niki notify reset:true` で解除するか、DBで保留中通知の `channel_id` を修正してください。この機能には [通知先マイグレーション](../supabase/migrations/202610010001_notify_channel.sql) と [複製投稿マイグレーション](../supabase/migrations/202610020001_notify_channel_mirror.sql) が必要で、**コードのデプロイより先に日付順で適用してください**。`/niki notify` を表示するには `npm run discord:register` でコマンドを再登録します。
 
 1回の定期処理は約40秒・最大10巡（判定と通知を各1件ずつ）です。残りは次の実行へ引き継ぎます。期限ぴったりの通知は保証しません。期限切れのOAuth情報と24時間以上前のinteraction受付記録は定期処理で削除し、利用履歴は保持します。
 

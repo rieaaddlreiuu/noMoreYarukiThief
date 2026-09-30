@@ -1,18 +1,18 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { handleCommand, type CommandDependencies, type Interaction } from "../src/lib/discord/handler";
+import { handleCommand, interactionSchema, type CommandDependencies, type Interaction } from "../src/lib/discord/handler";
 import { declaration, discordId, guildId, applicationId, channelId } from "./fixtures";
 
 afterEach(() => vi.useRealTimers());
 
-function interaction(name: Interaction["data"]["options"][number]["name"], options: Record<string, string | number> = {}, permissions = "0"): Interaction {
-  return { id: "500000000000000001", application_id: applicationId, type: 2, token: "interaction-token", guild_id: guildId,
+function interaction(name: Interaction["data"]["options"][number]["name"], options: Record<string, string | number | boolean> = {}, permissions = "0"): Interaction {
+  return { id: "500000000000000001", application_id: applicationId, type: 2, token: "interaction-token", guild_id: guildId, channel_id: channelId,
     member: { user: { id: discordId }, permissions },
     data: { name: "niki", options: [{ name, type: 1, options: Object.entries(options).map(([name, value]) => ({ name, value, type: 3 })) }] } };
 }
 
 function dependencies() {
   const mocks = {
-    setup: vi.fn(), requireSetup: vi.fn(), requireMember: vi.fn(), issueOAuth: vi.fn(),
+    setup: vi.fn(), setNotifyChannel: vi.fn(), requireSetup: vi.fn(), requireMember: vi.fn(), issueOAuth: vi.fn(),
     createDeclaration: vi.fn().mockResolvedValue(declaration()), cancelDeclaration: vi.fn().mockResolvedValue(declaration({ status: "cancelled" })),
     teamStatus: vi.fn().mockResolvedValue({ members: [], declarations: [], pendingNotifications: 0 }),
     assertChannel: vi.fn(), validateRepository: vi.fn().mockResolvedValue({ repository: "owner/repository", branch: "main" }),
@@ -33,6 +33,21 @@ describe("command scope and permissions", () => {
     await handleCommand(interaction("setup", { channel: channelId }, "32"), deps);
     expect(mocks.assertChannel).toHaveBeenCalledWith(guildId, channelId);
     expect(mocks.setup).toHaveBeenCalledWith(guildId, channelId);
+  });
+  it("adds the channel where the command ran as the caller's personal channel, and clears it with reset", async () => {
+    const { mocks, deps } = dependencies();
+    await handleCommand(interaction("notify"), deps);
+    expect(mocks.requireMember).toHaveBeenCalledWith(guildId, discordId);
+    expect(mocks.assertChannel).toHaveBeenCalledWith(guildId, channelId);
+    expect(mocks.setNotifyChannel).toHaveBeenCalledWith(guildId, discordId, channelId);
+    mocks.assertChannel.mockClear();
+    await handleCommand(interaction("notify", { reset: true }), deps);
+    expect(mocks.assertChannel).not.toHaveBeenCalled();
+    expect(mocks.setNotifyChannel).toHaveBeenLastCalledWith(guildId, discordId, null);
+  });
+  it("accepts boolean options and the invoking channel in the signed payload", () => {
+    expect(interactionSchema.safeParse(interaction("notify", { reset: true })).success).toBe(true);
+    expect(interactionSchema.safeParse({ ...interaction("notify"), channel_id: undefined }).success).toBe(false);
   });
   it("issues only a hashed OAuth ticket, bound to the current guild and caller", async () => {
     const { mocks, deps } = dependencies();

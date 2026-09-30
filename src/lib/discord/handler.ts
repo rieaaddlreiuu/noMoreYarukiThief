@@ -9,11 +9,11 @@ import { type Message, statusMessage } from "./messages";
 
 export const interactionSchema = z.object({
   id: snowflake, application_id: snowflake, type: z.literal(2), token: z.string().min(1).max(512),
-  guild_id: snowflake,
+  guild_id: snowflake, channel_id: snowflake,
   member: z.object({ user: z.object({ id: snowflake }), permissions: z.string().regex(/^\d+$/) }),
   data: z.object({ name: z.literal("niki"), options: z.array(z.object({
-    name: z.enum(["setup", "github", "declare", "cancel", "status"]), type: z.literal(1),
-    options: z.array(z.object({ name: z.string(), type: z.number(), value: z.union([z.string(), z.number()]) })).optional(),
+    name: z.enum(["setup", "github", "declare", "notify", "cancel", "status"]), type: z.literal(1),
+    options: z.array(z.object({ name: z.string(), type: z.number(), value: z.union([z.string(), z.number(), z.boolean()]) })).optional(),
   })).length(1) }),
 });
 export type Interaction = z.infer<typeof interactionSchema>;
@@ -52,6 +52,18 @@ export async function handleCommand(interaction: Interaction, deps: CommandDepen
     const repository = await deps.validateRepository(parsed.repository, parsed.branch);
     const row = await deps.store.createDeclaration({ interactionId: interaction.id, guildId, discordId, content: parsed.content, deadline, ...repository });
     return { declarationId: row.id, message: { content: `宣言を保存しました。通知チャンネルへ投稿します。\n${discordText(row.content)}\n期限: ${formatJst(row.deadline)}\n判定するのは条件に合うコミットの有無です。` } };
+  }
+
+  if (command.name === "notify") {
+    await deps.store.requireMember(guildId, discordId);
+    if (options.reset === true) {
+      await deps.store.setNotifyChannel(guildId, discordId, null);
+      return { message: { content: "個人の通知先を解除しました。以後の通知はサーバーの既定チャンネルだけに届きます。" } };
+    }
+    const channelId = interaction.channel_id;
+    await deps.discord.assertChannel(guildId, channelId);
+    await deps.store.setNotifyChannel(guildId, discordId, channelId);
+    return { message: { content: `このチャンネル（<#${channelId}>）を自分の通知先に追加しました。以後の宣言・取消・結果通知は、サーバーの既定チャンネルとここの両方に届きます（作成済みの通知は変わりません）。` } };
   }
 
   if (command.name === "cancel") {

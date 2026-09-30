@@ -15,6 +15,8 @@ beforeAll(async () => {
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
   await db.exec(readFileSync(new URL("../supabase/migrations/202609260001_mvp.sql", import.meta.url), "utf8"));
   await db.exec(readFileSync(new URL("../supabase/migrations/202609300001_ai_judgement.sql", import.meta.url), "utf8"));
+  await db.exec(readFileSync(new URL("../supabase/migrations/202610010001_notify_channel.sql", import.meta.url), "utf8"));
+  await db.exec(readFileSync(new URL("../supabase/migrations/202610020001_notify_channel_mirror.sql", import.meta.url), "utf8"));
 });
 afterAll(async () => { await db?.close(); });
 beforeEach(async () => {
@@ -45,6 +47,56 @@ const store: JobStore = {
   finishNotification: (row, messageId) => scalar<boolean>("select public.niki_finish_notification($1,$2,$3) as value", [row.id, row.lease_token, messageId]),
   retryNotification: async (row, error, delay) => { await db.query("select public.niki_retry_notification($1,$2,$3,$4)", [row.id, row.lease_token, error, delay]); },
 };
+
+describe("personal notification channel mirrors the guild channel", () => {
+  const personal = "900000000000000001";
+  const channels = async () => (await db.query<{ kind: string; channel_id: string }>("select kind, channel_id from public.notifications order by sequence")).rows;
+  const setPersonal = (channel: string | null) => db.query("select public.niki_set_notify_channel($1,$2,$3)", [guildId, discordId, channel]);
+  it("posts declared and cancelled notifications to the guild default first, then the personal channel", async () => {
+    await setPersonal(personal);
+    await createDeclaration();
+    await db.query("select public.niki_cancel_declaration($1,$2)", [guildId, discordId]);
+    expect(await channels()).toEqual([
+      { kind: "declared", channel_id: channelId }, { kind: "declared", channel_id: personal },
+      { kind: "cancelled", channel_id: channelId }, { kind: "cancelled", channel_id: personal },
+    ]);
+  });
+  it("creates a single row when unset or when the personal channel is the guild default", async () => {
+    await createDeclaration();
+    expect(await channels()).toEqual([{ kind: "declared", channel_id: channelId }]);
+    await db.query("truncate public.notifications, public.declarations cascade");
+    await setPersonal(channelId);
+    await createDeclaration("500000000000000004");
+    expect(await channels()).toEqual([{ kind: "declared", channel_id: channelId }]);
+  });
+  it("mirrors the result notification once and keeps existing notifications fixed", async () => {
+    const expired = await expiredDeclaration();
+    await setPersonal(personal);
+    const claimed = (await store.claimCheck())!;
+    expect(claimed.id).toBe(expired.id);
+    await store.finishCheck(claimed, null);
+    await setPersonal(null);
+    expect(await channels()).toEqual([{ kind: "result", channel_id: channelId }, { kind: "result", channel_id: personal }]);
+    await expect(db.query("insert into public.notifications (declaration_id, kind, channel_id) values ($1,'result',$2)", [expired.id, personal])).rejects.toThrow();
+  });
+  it("does not let a failing personal channel block the guild default channel", async () => {
+    await setPersonal(personal);
+    const row = await createDeclaration();
+    const first = (await store.claimNotification(row.id))!;
+    expect(first.channel_id).toBe(channelId);
+    await store.finishNotification(first, "1");
+    const second = (await store.claimNotification(row.id))!;
+    expect(second.channel_id).toBe(personal);
+    await store.retryNotification(second, "boom", 60);
+    await db.query("select public.niki_cancel_declaration($1,$2)", [guildId, discordId]);
+    const next = (await store.claimNotification(row.id))!;
+    expect(next).toMatchObject({ kind: "cancelled", channel_id: channelId });
+  });
+  it("requires an active membership and a valid snowflake", async () => {
+    await expect(db.query("select public.niki_set_notify_channel($1,$2,$3)", [otherGuildId, otherDiscordId, personal])).rejects.toThrow("LINK_REQUIRED");
+    await expect(db.query("select public.niki_set_notify_channel($1,$2,'abc')", [guildId, discordId])).rejects.toThrow();
+  });
+});
 
 describe("transactional declaration management", () => {
   it("saves a declaration and notification together and deduplicates its interaction", async () => {
