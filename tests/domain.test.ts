@@ -41,6 +41,18 @@ describe("Discord output", () => {
     expect(message.allowed_mentions).toEqual({ parse: [], users: [discordId] });
     expect(message.embeds![0].description).not.toContain("@everyone");
   });
+  it("shows the AI judgement reason only for failed results, escaped", () => {
+    const failed = declaration({ status: "failed", ai_reason: "無関係な *修正* @everyone" });
+    const message = notificationMessage(notification(), failed);
+    const field = message.embeds![0].fields!.find((f) => f.name === "AIの判定理由");
+    expect(field?.value).toBe("無関係な \\*修正\\* @​everyone");
+
+    const succeeded = declaration({ status: "succeeded", ai_reason: "一致", commit_sha: "a".repeat(40) });
+    expect(notificationMessage(notification(), succeeded).embeds![0].fields!.some((f) => f.name === "AIの判定理由")).toBe(false);
+
+    const declared = declaration({ ai_reason: null });
+    expect(notificationMessage(notification({ kind: "declared" }), declared).embeds![0].fields!.some((f) => f.name === "AIの判定理由")).toBe(false);
+  });
   it("keeps worst-case paginated messages within Discord embed limits", () => {
     const members = Array.from({ length: 11 }, (_, i) => ({ discord_id: String(200000000000000001n + BigInt(i)), github_login: "a".repeat(39) }));
     const rows = Array.from({ length: 15 }, (_, i) => declaration({ content: "*".repeat(500), repository: `owner/${"_".repeat(100)}`, branch: "_".repeat(255), status: i < 5 ? "pending" : "succeeded", commit_sha: i < 5 ? null : "a".repeat(40) }));

@@ -1,6 +1,7 @@
 import "server-only";
 import { Octokit } from "@octokit/rest";
 import { z } from "zod";
+import { judgeCommits } from "./ai";
 import { appOrigin, env } from "./config";
 import { type Declaration, UserError } from "./domain";
 
@@ -36,7 +37,7 @@ export async function validateRepository(repository: string, branch?: string, cl
 export type CommitCandidate = {
   sha: string;
   author: { id?: number } | null;
-  commit: { committer: { date?: string } | null };
+  commit: { committer: { date?: string } | null; message: string };
 };
 
 export function matchesDeclaration(commit: CommitCandidate, declaration: Declaration) {
@@ -46,7 +47,7 @@ export function matchesDeclaration(commit: CommitCandidate, declaration: Declara
   return date >= Date.parse(declaration.created_at) && date <= Date.parse(declaration.deadline);
 }
 
-export async function findQualifyingCommit(declaration: Declaration, signal: AbortSignal, client = githubClient()): Promise<string | null> {
+export async function findQualifyingCommit(declaration: Declaration, signal: AbortSignal, client = githubClient()): Promise<{ sha: string; aiReason?: string } | null> {
   const [owner, repo] = declaration.repository.split("/");
   const request = { signal };
   // A formerly public repository becoming private is a verification error, never a failure.
@@ -54,6 +55,8 @@ export async function findQualifyingCommit(declaration: Declaration, signal: Abo
   if (repository.private || repository.visibility && repository.visibility !== "public") throw new Error("Repository is no longer public");
   // Check the named branch even if its history has since disappeared or changed.
   const { data: branch } = await client.repos.getBranch({ owner, repo, branch: declaration.branch, headers, request });
+  const candidates: CommitCandidate[] = [];
+  let scanComplete = false;
   for (let page = 1; page <= 20; page++) {
     const { data, headers: responseHeaders } = await client.repos.listCommits({
       owner, repo, sha: branch.commit.sha,
@@ -62,12 +65,22 @@ export async function findQualifyingCommit(declaration: Declaration, signal: Abo
       until: new Date(Date.parse(declaration.deadline) + 1000).toISOString(),
       per_page: 100, page, headers, request,
     });
-    const match = data.find((commit) => matchesDeclaration(commit, declaration));
-    if (match) return match.sha;
-    if (!responseHeaders.link?.includes('rel="next"')) return null;
+    candidates.push(...data.filter((commit) => matchesDeclaration(commit, declaration)));
+    if (!responseHeaders.link?.includes('rel="next"')) { scanComplete = true; break; }
   }
   // Never report failure when pagination was incomplete.
-  throw new Error("Commit scan limit reached");
+  if (!scanComplete) throw new Error("Commit scan limit reached");
+
+  if (candidates.length === 0) return null;
+  if (!process.env.GEMINI_API_KEY) return { sha: candidates[0].sha };
+
+  const verdict = await judgeCommits(
+    declaration.content,
+    candidates.map((c) => ({ sha: c.sha.slice(0, 7), message: c.commit.message })),
+    signal,
+  );
+  if (!verdict) return null;
+  return { sha: candidates[verdict.index].sha, aiReason: verdict.reason };
 }
 
 export async function exchangeGitHubCode(code: string, verifier: string) {

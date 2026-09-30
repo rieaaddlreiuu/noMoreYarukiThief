@@ -1,10 +1,14 @@
 import { Octokit } from "@octokit/rest";
 import { describe, expect, it, vi } from "vitest";
-import { findQualifyingCommit, matchesDeclaration, validateRepository } from "../src/lib/github";
 import { declaration } from "./fixtures";
 
-function candidate(date: string, id = 1234, sha = "a".repeat(40)) {
-  return { sha, author: { id }, commit: { committer: { date } } };
+const mocks = vi.hoisted(() => ({ judgeCommits: vi.fn() }));
+vi.mock("../src/lib/ai", () => ({ judgeCommits: mocks.judgeCommits }));
+
+const { findQualifyingCommit, matchesDeclaration, validateRepository } = await import("../src/lib/github");
+
+function candidate(date: string, id = 1234, sha = "a".repeat(40), message = "ログイン画面を実装する") {
+  return { sha, author: { id }, commit: { committer: { date }, message } };
 }
 
 it("matches the linked author ID and inclusive committer-time bounds", () => {
@@ -38,7 +42,7 @@ describe("public GitHub evaluation", () => {
   it("paginates and pins the selected branch head, without filtering by mutable login", async () => {
     const row = declaration();
     const { client, fetcher } = mockedClient([{ body: [candidate(row.deadline, 9999)], next: true }, { body: [candidate(row.deadline)] }]);
-    expect(await findQualifyingCommit(row, AbortSignal.timeout(1000), client)).toBe("a".repeat(40));
+    expect(await findQualifyingCommit(row, AbortSignal.timeout(1000), client)).toEqual({ sha: "a".repeat(40) });
     expect(fetcher.mock.calls.map(([url]) => String(url)).filter((url) => url.includes("/commits?"))).toHaveLength(2);
     const query = new URL(String(fetcher.mock.calls.at(-1)![0])).searchParams;
     expect(query.get("sha")).toBe("branch-head");
@@ -50,5 +54,41 @@ describe("public GitHub evaluation", () => {
     await expect(findQualifyingCommit(row, AbortSignal.timeout(1000), mockedClient([{ body: { message: "rate limited" }, status: 403 }]).client)).rejects.toThrow();
     await expect(findQualifyingCommit(row, AbortSignal.timeout(1000), mockedClient([], true).client)).rejects.toThrow();
     await expect(findQualifyingCommit(row, AbortSignal.timeout(2000), mockedClient(Array.from({ length: 20 }, () => ({ body: [], next: true }))).client)).rejects.toThrow("scan limit");
+  });
+
+  describe("AI judgement (GEMINI_API_KEY set)", () => {
+    const withKey = <T>(fn: () => Promise<T>) => {
+      process.env.GEMINI_API_KEY = "test-key";
+      return fn().finally(() => { delete process.env.GEMINI_API_KEY; });
+    };
+
+    it("adopts the candidate the AI judge selects by index", async () => {
+      const row = declaration();
+      mocks.judgeCommits.mockResolvedValueOnce({ index: 1, reason: "宣言内容と一致" });
+      const { client } = mockedClient([{ body: [candidate(row.deadline, 1234, "b".repeat(40)), candidate(row.deadline, 1234, "c".repeat(40))] }]);
+      await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client)))
+        .resolves.toEqual({ sha: "c".repeat(40), aiReason: "宣言内容と一致" });
+    });
+
+    it("treats a null verdict as unmet", async () => {
+      const row = declaration();
+      mocks.judgeCommits.mockResolvedValueOnce(null);
+      const { client } = mockedClient([{ body: [candidate(row.deadline)] }]);
+      await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client))).resolves.toBeNull();
+    });
+
+    it("propagates AI call failures instead of treating them as unmet", async () => {
+      const row = declaration();
+      mocks.judgeCommits.mockRejectedValueOnce(new Error("Gemini API HTTP 500"));
+      const { client } = mockedClient([{ body: [candidate(row.deadline)] }]);
+      await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client))).rejects.toThrow();
+    });
+
+    it("never calls the AI judge when there are no candidates", async () => {
+      const row = declaration();
+      const { client } = mockedClient([{ body: [] }]);
+      await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client))).resolves.toBeNull();
+      expect(mocks.judgeCommits).not.toHaveBeenCalled();
+    });
   });
 });

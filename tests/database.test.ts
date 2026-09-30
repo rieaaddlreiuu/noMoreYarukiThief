@@ -14,6 +14,7 @@ beforeAll(async () => {
   db = new PGlite();
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
   await db.exec(readFileSync(new URL("../supabase/migrations/202609260001_mvp.sql", import.meta.url), "utf8"));
+  await db.exec(readFileSync(new URL("../supabase/migrations/202609300001_ai_judgement.sql", import.meta.url), "utf8"));
 });
 afterAll(async () => { await db?.close(); });
 beforeEach(async () => {
@@ -37,7 +38,7 @@ async function expiredDeclaration() {
 
 const store: JobStore = {
   claimCheck: () => one<Declaration>("select to_jsonb(d) as row from public.niki_claim_check() d"),
-  finishCheck: (row, sha) => scalar<boolean>("select public.niki_finish_check($1,$2,$3) as value", [row.id, row.lease_token, sha]),
+  finishCheck: (row, sha, aiReason) => scalar<boolean>("select public.niki_finish_check($1,$2,$3,$4) as value", [row.id, row.lease_token, sha, aiReason ?? null]),
   retryCheck: async (row, error, delay) => { await db.query("select public.niki_retry_check($1,$2,$3,$4)", [row.id, row.lease_token, error, delay]); },
   claimNotification: (declarationId) => one<Notification>("select to_jsonb(n) as row from public.niki_claim_notification($1) n", [declarationId ?? null]),
   getDeclaration: async (id) => (await one<Declaration>("select to_jsonb(d) as row from public.declarations d where id=$1", [id]))!,
@@ -91,7 +92,7 @@ describe("leases, retry, and the complete declaration/result loop", () => {
   });
   it.each(["a".repeat(40), null])("saves achievement/failure and posts once, even on repeated cron runs (%s)", async (sha) => {
     const row = await expiredDeclaration();
-    const findCommit = vi.fn().mockResolvedValue(sha);
+    const findCommit = vi.fn().mockResolvedValue(sha ? { sha } : null);
     const deliver = vi.fn().mockResolvedValue("600000000000000001");
     expect(await runJobs({ store, findCommit, deliver })).toMatchObject({ checked: 1, notified: 1 });
     expect((await store.getDeclaration(row.id)).status).toBe(sha ? "succeeded" : "failed");
@@ -110,7 +111,7 @@ describe("leases, retry, and the complete declaration/result loop", () => {
   });
   it("retries only the notification after posting fails", async () => {
     const row = await expiredDeclaration();
-    const findCommit = vi.fn().mockResolvedValue("b".repeat(40));
+    const findCommit = vi.fn().mockResolvedValue({ sha: "b".repeat(40) });
     const deliver = vi.fn().mockRejectedValueOnce(new Error("network")).mockResolvedValue("600000000000000002");
     expect(await runJobs({ store, findCommit, deliver })).toMatchObject({ checked: 1, notificationRetry: 1 });
     await db.exec("update public.notifications set next_attempt_at=now()");
@@ -146,6 +147,8 @@ describe("OAuth and database access boundaries", () => {
     expect(await scalar("select has_table_privilege('authenticated','public.oauth_sessions','select') as value")).toBe(false);
     expect(await scalar("select has_function_privilege('anon','public.niki_claim_check()','execute') as value")).toBe(false);
     expect(await scalar("select has_function_privilege('service_role','public.niki_claim_check()','execute') as value")).toBe(true);
+    expect(await scalar("select has_function_privilege('anon','public.niki_finish_check(uuid,uuid,text,text)','execute') as value")).toBe(false);
+    expect(await scalar("select has_function_privilege('service_role','public.niki_finish_check(uuid,uuid,text,text)','execute') as value")).toBe(true);
     expect(await scalar("select relrowsecurity as value from pg_class where oid='public.declarations'::regclass")).toBe(true);
   });
 });

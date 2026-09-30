@@ -4,7 +4,7 @@ import { safeError } from "./security";
 
 export type JobDependencies = {
   store: JobStore;
-  findCommit: (row: Declaration, signal: AbortSignal) => Promise<string | null>;
+  findCommit: (row: Declaration, signal: AbortSignal) => Promise<{ sha: string; aiReason?: string } | null>;
   deliver: (row: Notification, declaration: Declaration, signal: AbortSignal) => Promise<string>;
 };
 
@@ -18,8 +18,8 @@ function delayFor(error: unknown, attempts: number) {
 
 async function checkOne(deps: JobDependencies, row: Declaration, deadline: number) {
   try {
-    const sha = await deps.findCommit(row, AbortSignal.timeout(Math.max(1, Math.min(20_000, deadline - Date.now()))));
-    return await deps.store.finishCheck(row, sha) ? "checked" : "stale";
+    const result = await deps.findCommit(row, AbortSignal.timeout(Math.max(1, Math.min(20_000, deadline - Date.now()))));
+    return await deps.store.finishCheck(row, result?.sha ?? null, result?.aiReason) ? "checked" : "stale";
   } catch (error) {
     await deps.store.retryCheck(row, safeError(error), delayFor(error, row.check_attempts));
     return "checkRetry";
