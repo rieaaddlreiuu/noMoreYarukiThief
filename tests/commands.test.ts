@@ -1,6 +1,8 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { handleCommand, type CommandDependencies, type Interaction } from "../src/lib/discord/handler";
 import { declaration, discordId, guildId, applicationId, channelId } from "./fixtures";
+
+afterEach(() => vi.useRealTimers());
 
 function interaction(name: Interaction["data"]["options"][number]["name"], options: Record<string, string | number> = {}, permissions = "0"): Interaction {
   return { id: "500000000000000001", application_id: applicationId, type: 2, token: "interaction-token", guild_id: guildId,
@@ -42,6 +44,8 @@ describe("command scope and permissions", () => {
     expect(message.content).not.toContain(hash);
   });
   it("requires participation and validates repository before saving a declaration", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2098-12-31T11:00:00Z"));
     const { mocks, deps } = dependencies();
     await handleCommand(interaction("declare", { content: "開発", repository: "owner/repository", deadline: "2099-01-01 22:00" }), deps);
     expect(mocks.requireMember).toHaveBeenCalledWith(guildId, discordId);
@@ -57,5 +61,12 @@ describe("command scope and permissions", () => {
     expect(mocks.cancelDeclaration).toHaveBeenCalledWith(guildId, discordId);
     await handleCommand(interaction("status"), deps);
     expect(mocks.teamStatus).toHaveBeenCalledWith(guildId);
+  });
+  it("saves a natural-language deadline as UTC", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(new Date("2026-10-01T11:00:00Z"));
+    const { mocks, deps } = dependencies();
+    await handleCommand(interaction("declare", { content: "開発", repository: "owner/repository", deadline: "明日 9時" }), deps);
+    expect(mocks.createDeclaration).toHaveBeenCalledWith(expect.objectContaining({ deadline: "2026-10-02T00:00:00.000Z" }));
   });
 });
