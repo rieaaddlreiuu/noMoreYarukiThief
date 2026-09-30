@@ -47,7 +47,7 @@ describe("Discord HTTP entry point", () => {
     const createDeclaration = vi.fn();
     mocks.createStore.mockReturnValue({ claimInteraction: vi.fn().mockResolvedValue(true), requireSetup: vi.fn(), requireMember: vi.fn(), createDeclaration });
     mocks.editReply.mockResolvedValue(undefined);
-    const payload = { id: "500000000000000001", application_id: applicationId, type: 2, token: "test", guild_id: guildId,
+    const payload = { id: "500000000000000001", application_id: applicationId, type: 2, token: "test", guild_id: guildId, channel_id: channelId,
       member: { user: { id: discordId }, permissions: "0" }, data: { name: "niki", options: [{ type: 1, name: "declare",
         options: Object.entries({ content: "開発", repository: "owner/repository", deadline }).map(([name, value]) => ({ name, value, type: 3 })),
       }] } };
