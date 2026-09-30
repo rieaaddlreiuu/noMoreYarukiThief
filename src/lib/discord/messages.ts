@@ -10,15 +10,58 @@ export const notificationMarker = (id: string) => `記録ID: ${id}`;
 const target = (d: Declaration) => `${discordText(d.repository)} / ${discordText(d.branch)}`;
 const commitUrl = (d: Declaration) => `https://github.com/${d.repository}/commit/${d.commit_sha}`;
 
-export function notificationMessage(row: Notification, d: Declaration): Message {
+export type NikiScene = "declared" | "cancelled" | "succeeded" | "failed" | "checkError";
+type NikiWords = { name: string; content: string; deadline: string };
+
+// Character sheet: docs/niki-character.md. Each line uses the name at most once so the declarer is mentioned only once.
+export const nikiLines: Record<NikiScene, ((w: NikiWords) => string)[]> = {
+  declared: [
+    (w) => `${w.name}が宣言したぞ。「${w.content}」、期限は${w.deadline}。言ったな？聞いたからな。`,
+    (w) => `おっ、${w.name}。「${w.content}」を${w.deadline}までにか。いい顔してんじゃねぇか。`,
+    (w) => `宣言受理。${w.deadline}に俺が見に行く。コミットは嘘つかねぇぞ、${w.name}。`,
+    (w) => `${w.name}、「${w.content}」な。みんなも聞いたよな？もう逃げ道はねぇぞ。`,
+  ],
+  cancelled: [
+    (w) => `${w.name}が宣言を取り下げた。……まぁ、引く勇気も大事だ。次は守れよ。`,
+    (w) => `取消了解。今回は見逃してやる。次はねぇからな、${w.name}。`,
+    (w) => `${w.name}、撤退か。作戦の練り直しなら許す。サボりなら許さねぇ。`,
+  ],
+  succeeded: [
+    (w) => `${w.name}、やったじゃねぇか！「${w.content}」、確かに見届けた。`,
+    (w) => `コミット確認。${w.name}、お前は口だけじゃなかったな。`,
+    (w) => `期限内にやり切った${w.name}に拍手。こういうのが一番かっこいいんだよ。`,
+    (w) => `${w.name}の草がまた伸びた。いい芝だ、この調子で育てていけ。`,
+    (w) => `宣言して、やった。それだけのことが一番難しいんだ。よくやった、${w.name}。`,
+    (w) => `「${w.content}」完了。${w.name}、今日のメシはうまいぞ。`,
+  ],
+  failed: [
+    (w) => `${w.name}……「${w.content}」はどこ行った？俺のところには何も届いてねぇぞ。`,
+    (w) => `期限切れだ、${w.name}。やる気泥棒にまんまと盗まれたな。次は守り切れよ。`,
+    (w) => `コミットは嘘つかねぇ。つまり今回はゼロってことだ。次で取り返せ、${w.name}。`,
+    (w) => `${w.name}、宣言だけは立派だったな。次は手も動かそうぜ。`,
+    (w) => `おい${w.name}、「明日やる」は今日やらなかった奴のセリフだぞ。明日こそな。`,
+    (w) => `今回は負けだな、${w.name}。1行でいい、次は何か残せ。`,
+  ],
+  checkError: [
+    () => "GitHubの様子がおかしい。判定はちょっと待ってろ、逃がしはしねぇから。",
+  ],
+};
+
+// `name` is inserted as given (a mention or an already-escaped display name). `content` is user text:
+// it is shortened so the message stays far below Discord's 2000-character limit, then escaped.
+export function nikiLine(scene: NikiScene, words: NikiWords, random: () => number = Math.random) {
+  const lines = nikiLines[scene];
+  const chars = Array.from(words.content);
+  const content = discordText(chars.slice(0, 100).join("")) + (chars.length > 100 ? "…" : "");
+  return lines[Math.min(lines.length - 1, Math.floor(random() * lines.length))]({ ...words, content });
+}
+
+export function notificationMessage(row: Notification, d: Declaration, random: () => number = Math.random): Message {
   const succeeded = d.status === "succeeded";
   const title = row.kind === "declared" ? "開発の宣言" : row.kind === "cancelled" ? "宣言を取消" : succeeded ? "達成" : "未達成";
-  const line = row.kind === "declared" ? "宣言、受け取ったで。コミット待ってるぞ。"
-    : row.kind === "cancelled" ? "この宣言は取り消し。判定と集計の対象から外したで。"
-    : succeeded ? "有言実行やな！ ちゃんと手を動かしたの、ニキは見てたで。"
-    : "宣言は立派やったな！ 今回は条件に合うコミットを見つけられんかったで。";
+  const scene = row.kind === "result" ? (succeeded ? "succeeded" : "failed") : row.kind;
   return {
-    content: `<@${d.discord_id}> ${line}`,
+    content: nikiLine(scene, { name: `<@${d.discord_id}>`, content: d.content, deadline: formatJst(d.deadline) }, random),
     allowed_mentions: { parse: [], users: [d.discord_id] },
     embeds: [{ title, description: discordText(d.content), color: 0xcceeff,
       fields: [
