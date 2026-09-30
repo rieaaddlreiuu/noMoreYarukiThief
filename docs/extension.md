@@ -191,6 +191,8 @@ Vercel側:
 
 ## 5. ユーザーごとに通知チャンネルを変更できるようにする
 
+> **ステータス: 実装済み（案B: guild既定に複製投稿）** — 当初の案A（差し替え）から変更しました。`/niki notify`は実行したチャンネルを個人の追加通知先にし（`reset:true`で解除）、通知は`notifications`をチャンネルごとの独立行（`unique (declaration_id, kind, channel_id)`）としてguild既定と個人チャンネルの両方に投稿します。マイグレーションは[202610010001_notify_channel.sql](supabase/migrations/202610010001_notify_channel.sql)と[202610020001_notify_channel_mirror.sql](supabase/migrations/202610020001_notify_channel_mirror.sql)。公開性はguild既定への必須投稿で担保されるため、非公開チャンネルの扱いは問題になりません。以下の仕様・実装方針は当初案Aの設計メモです。
+
 ### 課題
 
 現在`/niki setup`で設定できる通知先は**guildにつき1チャンネルだけ**（[guild_settings](supabase/migrations/202609260001_mvp.sql#L10-L14)テーブル）で、宣言・取消・結果の通知は全メンバー分がそのチャンネルに集まります（[niki_create_declaration](supabase/migrations/202609260001_mvp.sql#L116-L140)などが`guild_settings.channel_id`を参照して`notifications`行を作成）。メンバーが増えるほど1チャンネルの流量が増え、自分に関係する通知を追いにくくなります。

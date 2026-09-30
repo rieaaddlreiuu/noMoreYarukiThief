@@ -1,7 +1,7 @@
 import { generateKeyPairSync, sign } from "node:crypto";
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applicationId, discordId, guildId } from "./fixtures";
+import { applicationId, channelId, discordId, guildId } from "./fixtures";
 
 const mocks = vi.hoisted(() => ({
   after: vi.fn(), createStore: vi.fn(), cleanup: vi.fn(), beginOAuth: vi.fn(), consumeOAuth: vi.fn(), linkGitHub: vi.fn(),
@@ -65,7 +65,7 @@ describe("Discord HTTP entry point", () => {
     expect(mocks.createStore).not.toHaveBeenCalled();
   });
   it("defers ephemeral replies before any network/database work", async () => {
-    const payload = { id: "500000000000000001", application_id: applicationId, type: 2, token: "test", guild_id: guildId,
+    const payload = { id: "500000000000000001", application_id: applicationId, type: 2, token: "test", guild_id: guildId, channel_id: channelId,
       member: { user: { id: discordId }, permissions: "0" }, data: { name: "niki", options: [{ type: 1, name: "status" }] } };
     expect(await (await discordPost(signedRequest(payload))).json()).toEqual({ type: 5, data: { flags: 64 } });
     expect(mocks.after).toHaveBeenCalledOnce();
