@@ -23,7 +23,9 @@ export type Declaration = {
   status: DeclarationStatus;
   commit_sha: string | null;
   ai_reason: string | null;
+  judged_shas: string[];
   checked_at: string | null;
+  next_check_at?: string;
   check_attempts: number;
   last_check_error: string | null;
   lease_token: string | null;

@@ -11,7 +11,7 @@ const claim = async () => (await query<WeeklyReport>("select * from public.niki_
 beforeAll(async () => {
   db = new PGlite();
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
-  for (const name of ["202609260001_mvp.sql", "202609300001_ai_judgement.sql", "202610010001_notify_channel.sql", "202610020001_notify_channel_mirror.sql", "202610030001_weekly_summary.sql"]) {
+  for (const name of ["202609260001_mvp.sql", "202609300001_ai_judgement.sql", "202610010001_notify_channel.sql", "202610020001_notify_channel_mirror.sql", "202610030001_weekly_summary.sql", "202610040001_early_check.sql", "202610050001_github_token.sql"]) {
     await db.exec(readFileSync(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"));
   }
 });

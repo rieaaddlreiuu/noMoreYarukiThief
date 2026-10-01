@@ -2,9 +2,12 @@ import type { JobStore } from "./store";
 import { type Declaration, type Notification, retryDelay } from "./domain";
 import { safeError } from "./security";
 
+// sha is null when nothing qualifies yet; judged lists candidates the AI rejected so they are not judged again.
+export type CheckResult = { sha: string | null; aiReason?: string; judged?: string[] };
+
 export type JobDependencies = {
   store: JobStore;
-  findCommit: (row: Declaration, signal: AbortSignal) => Promise<{ sha: string; aiReason?: string } | null>;
+  findCommit: (row: Declaration, signal: AbortSignal) => Promise<CheckResult | null>;
   deliver: (row: Notification, declaration: Declaration, signal: AbortSignal) => Promise<string>;
 };
 
@@ -19,7 +22,7 @@ function delayFor(error: unknown, attempts: number) {
 async function checkOne(deps: JobDependencies, row: Declaration, deadline: number) {
   try {
     const result = await deps.findCommit(row, AbortSignal.timeout(Math.max(1, Math.min(20_000, deadline - Date.now()))));
-    return await deps.store.finishCheck(row, result?.sha ?? null, result?.aiReason) ? "checked" : "stale";
+    return await deps.store.finishCheck(row, result?.sha ?? null, result?.aiReason, result?.judged) ? "checked" : "stale";
   } catch (error) {
     await deps.store.retryCheck(row, safeError(error), delayFor(error, row.check_attempts));
     return "checkRetry";

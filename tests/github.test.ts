@@ -5,7 +5,8 @@ import { declaration } from "./fixtures";
 const mocks = vi.hoisted(() => ({ judgeCommits: vi.fn() }));
 vi.mock("../src/lib/ai", () => ({ judgeCommits: mocks.judgeCommits }));
 
-const { findQualifyingCommit, matchesDeclaration, validateRepository } = await import("../src/lib/github");
+const { findCommitWithUserToken, findQualifyingCommit, matchesDeclaration, validateRepository } = await import("../src/lib/github");
+const { encryptToken } = await import("../src/lib/security");
 
 function candidate(date: string, id = 1234, sha = "a".repeat(40), message = "ログイン画面を実装する") {
   return { sha, author: { id }, commit: { committer: { date }, message } };
@@ -70,11 +71,20 @@ describe("public GitHub evaluation", () => {
         .resolves.toEqual({ sha: "c".repeat(40), aiReason: "宣言内容と一致" });
     });
 
-    it("treats a null verdict as unmet", async () => {
+    it("treats a null verdict as unmet and reports the rejected candidates", async () => {
       const row = declaration();
       mocks.judgeCommits.mockResolvedValueOnce(null);
       const { client } = mockedClient([{ body: [candidate(row.deadline)] }]);
+      await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client)))
+        .resolves.toEqual({ sha: null, judged: ["a".repeat(40)] });
+    });
+
+    it("does not judge again when every candidate was already rejected", async () => {
+      const row = declaration({ judged_shas: ["a".repeat(40)] });
+      mocks.judgeCommits.mockClear();
+      const { client } = mockedClient([{ body: [candidate(row.deadline)] }]);
       await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client))).resolves.toBeNull();
+      expect(mocks.judgeCommits).not.toHaveBeenCalled();
     });
 
     it("propagates AI call failures instead of treating them as unmet", async () => {
@@ -90,5 +100,54 @@ describe("public GitHub evaluation", () => {
       await expect(withKey(() => findQualifyingCommit(row, AbortSignal.timeout(1000), client))).resolves.toBeNull();
       expect(mocks.judgeCommits).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe("per-user token checks", () => {
+  const key = Buffer.alloc(32, 7);
+  const row = declaration();
+  const fakeStore = (stored: string | null) => ({ getGitHubToken: vi.fn(async () => stored), clearGitHubToken: vi.fn(async () => {}) });
+  const setKey = () => vi.stubEnv("TOKEN_ENCRYPTION_KEY", key.toString("base64"));
+  const unauthorized = () => Object.assign(new Error("Bad credentials"), { status: 401 });
+
+  it("uses the operator client when no key or token is configured", async () => {
+    const find = vi.fn(async () => ({ sha: "x" }));
+    const store = fakeStore("v1.x.y.z");
+    await findCommitWithUserToken(store, find)(row, AbortSignal.timeout(1000));
+    expect(find).toHaveBeenCalledWith(row, expect.anything());
+    expect(store.getGitHubToken).not.toHaveBeenCalled();
+    setKey();
+    try {
+      await findCommitWithUserToken(fakeStore(null), find)(row, AbortSignal.timeout(1000));
+      expect(find).toHaveBeenLastCalledWith(row, expect.anything());
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it("authenticates with the decrypted user token", async () => {
+    setKey();
+    try {
+      const find = vi.fn().mockResolvedValue({ sha: "x" });
+      await findCommitWithUserToken(fakeStore(encryptToken("gho_user", key)), find as never)(row, AbortSignal.timeout(1000));
+      const client = find.mock.calls[0][2] as Octokit;
+      expect(await client.auth()).toMatchObject({ type: "token", token: "gho_user" });
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it("drops a revoked token and retries with the operator token", async () => {
+    setKey();
+    try {
+      const find = vi.fn(async (_d: unknown, _s: unknown, client?: unknown) => { if (client) throw unauthorized(); return { sha: "x" }; });
+      const store = fakeStore(encryptToken("gho_user", key));
+      expect(await findCommitWithUserToken(store, find as never)(row, AbortSignal.timeout(1000))).toEqual({ sha: "x" });
+      expect(store.clearGitHubToken).toHaveBeenCalledWith(row.discord_id);
+      expect(find).toHaveBeenCalledTimes(2);
+    } finally { vi.unstubAllEnvs(); }
+  });
+  it("does not drop the token on other errors", async () => {
+    setKey();
+    try {
+      const find = vi.fn(async () => { throw Object.assign(new Error("rate"), { status: 403 }); });
+      const store = fakeStore(encryptToken("gho_user", key));
+      await expect(findCommitWithUserToken(store, find as never)(row, AbortSignal.timeout(1000))).rejects.toThrow("rate");
+      expect(store.clearGitHubToken).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 });

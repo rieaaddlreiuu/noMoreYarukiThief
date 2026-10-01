@@ -20,6 +20,7 @@ Copy-Item .env.example .env.local
 | `DISCORD_GUILD_ID` | 開発用サーバーID。指定するとコマンドをそのサーバーだけに登録。全体公開時は省略 |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | GitHub OAuth Appの認証情報 |
 | `GITHUB_API_TOKEN` | 任意。公開リポジトリ参照のAPIレート制限を緩和する運営側のトークン。非公開リポジトリ権限は不要。未設定でも動作するが、共有IPの未認証レート制限に達しやすい |
+| `TOKEN_ENCRYPTION_KEY` | 任意。32バイトのランダム値をbase64にしたもの（`openssl rand -base64 32`）。設定すると、連携ユーザーのOAuthトークンをAES-256-GCMで暗号化して保存し、そのユーザーの宣言確認に使う。未設定ならトークンは保存せず、`GITHUB_API_TOKEN`で確認する |
 | `GEMINI_API_KEY` | 任意。コミットメッセージが宣言内容と一致するかをAIで判定する機能を有効化する。未設定なら従来通り「author一致・期限内の最初のコミット」を達成として採用する。[Google AI Studio](https://aistudio.google.com/apikey)で発行できる |
 | `GEMINI_MODEL` | 任意。AI判定に使うGeminiモデル名。未設定なら `gemini-3.8-flash`。モデルが廃止されて404になった場合に差し替える |
 | `SUPABASE_URL` | SupabaseのProject URL |
@@ -78,7 +79,7 @@ GitHub Settings → Developer settings → OAuth Appsでアプリを作成しま
 - Client IDとClient Secretを環境変数へ設定。
 - callbackのワイルドカードは不要。上記のURLと一致させます。
 
-OAuthでは公開プロフィールの本人確認だけを行い、`repo`、`user:email` などの追加scopeは要求しません。PKCEとstate、HttpOnly Cookieの照合を行います。ユーザーのOAuthアクセストークンは `/user` の呼び出し後に保持しません。公開コミット取得には運営側の任意の `GITHUB_API_TOKEN` を使います。
+OAuthでは公開プロフィールの本人確認だけを行い、`repo`、`user:email` などの追加scopeは要求しません。PKCEとstate、HttpOnly Cookieの照合を行います。ユーザーのOAuthアクセストークンは、`TOKEN_ENCRYPTION_KEY` を設定した場合のみAES-256-GCMで暗号化してDBに保存します（平文では保存せず、Cookieやログにも出しません）。scopeが空なので、このトークンで読めるのは公開情報だけです。保存したトークンはそのユーザーの宣言確認に使い、レート制限をユーザーごとに分散させます。トークンが無い、失効した（401）、復号できない場合は、運営側の任意の `GITHUB_API_TOKEN` に切り替えます。`TOKEN_ENCRYPTION_KEY` を失う・変更すると保存済みトークンは使えなくなりますが、`/niki github` の再連携で復旧できます。
 
 ### 3-1. OAuth App登録フォームの各設定
 
@@ -95,11 +96,11 @@ Redirect URI欄の下にある追加設定は、いずれもデフォルトの�
 | --- | --- | --- |
 | Allow wildcard matching | OFF（チェックなし） | callback URLは1つに固定できるため、サブドメイン・パスのワイルドカード許可は不要かつ余計な攻撃面を増やすだけ |
 | Enable Device Flow | OFF（チェックなし） | CLIやスマートTVなどブラウザ操作しにくい端末向けの認可方式。本プロジェクトは通常のブラウザ経由Authorization Code Flow（+PKCE）のみを使うため不要 |
-| Expire user access tokens | ON（チェックあり、デフォルト） | GitHub推奨のデフォルト設定。本プロジェクトは`/user`呼び出し後にアクセストークンを保持しないため有効期限・refresh_tokenの仕組み自体を使う場面はないが、有効にしておいても動作に影響しない |
+| Expire user access tokens | ON（チェックあり、デフォルト） | GitHub推奨のデフォルト設定。保存したトークンが期限切れで401になった場合は破棄して`GITHUB_API_TOKEN`に切り替える（refresh_tokenは使わない）ので、有効にしておいても動作に影響しない |
 
 ### 3-2. `GITHUB_API_TOKEN`について
 
-`GITHUB_API_TOKEN`は、各ユーザーが`/niki github`で連携する際のOAuthトークンとは別物で、**運営側（Bot管理者）が任意で用意する1つのトークン**です。宣言の期限後にコミット履歴をGitHub Commit APIで確認する処理（[7章](#7-判定再試行の仕様)）でのみ使います。
+`GITHUB_API_TOKEN`は、各ユーザーが`/niki github`で連携する際のOAuthトークンとは別物で、**運営側（Bot管理者）が任意で用意する1つのトークン**です。宣言のコミット履歴（期限前の定期確認と期限後の最終確認）をGitHub Commit APIで確認する処理（[7章](#7-判定再試行の仕様)）で、ユーザー自身の保存済みトークンが使えない場合のフォールバックとして使います。
 
 - 未設定でも動作しますが、GitHub REST APIは未認証だと1時間あたり60リクエストという制限があり、共有IPのVercel環境では他の利用者と合算ですぐ制限に達しやすくなります。設定すると1時間あたり5,000リクエストまで緩和されます。
 - レート制限に達した場合は「確認エラー」として保留され、判定失敗（未達成）にはなりません（[7章](#7-判定再試行の仕様)）。ただし判定が遅延するため、実運用では設定を推奨します。

@@ -17,6 +17,8 @@ beforeAll(async () => {
   await db.exec(readFileSync(new URL("../supabase/migrations/202609300001_ai_judgement.sql", import.meta.url), "utf8"));
   await db.exec(readFileSync(new URL("../supabase/migrations/202610010001_notify_channel.sql", import.meta.url), "utf8"));
   await db.exec(readFileSync(new URL("../supabase/migrations/202610020001_notify_channel_mirror.sql", import.meta.url), "utf8"));
+  await db.exec(readFileSync(new URL("../supabase/migrations/202610040001_early_check.sql", import.meta.url), "utf8"));
+  await db.exec(readFileSync(new URL("../supabase/migrations/202610050001_github_token.sql", import.meta.url), "utf8"));
 });
 afterAll(async () => { await db?.close(); });
 beforeEach(async () => {
@@ -40,7 +42,7 @@ async function expiredDeclaration() {
 
 const store: JobStore = {
   claimCheck: () => one<Declaration>("select to_jsonb(d) as row from public.niki_claim_check() d"),
-  finishCheck: (row, sha, aiReason) => scalar<boolean>("select public.niki_finish_check($1,$2,$3,$4) as value", [row.id, row.lease_token, sha, aiReason ?? null]),
+  finishCheck: (row, sha, aiReason, judged) => scalar<boolean>("select public.niki_finish_check($1,$2,$3,$4,$5) as value", [row.id, row.lease_token, sha, aiReason ?? null, judged ?? null]),
   retryCheck: async (row, error, delay) => { await db.query("select public.niki_retry_check($1,$2,$3,$4)", [row.id, row.lease_token, error, delay]); },
   claimNotification: (declarationId) => one<Notification>("select to_jsonb(n) as row from public.niki_claim_notification($1) n", [declarationId ?? null]),
   getDeclaration: async (id) => (await one<Declaration>("select to_jsonb(d) as row from public.declarations d where id=$1", [id]))!,
@@ -122,6 +124,13 @@ describe("transactional declaration management", () => {
     expect(await one("select to_jsonb(d) as row from public.niki_cancel_declaration($1,$2) d", [guildId, discordId])).toBeNull();
     expect((await store.getDeclaration(expired.id)).status).toBe("pending");
   });
+  it("stores the encrypted token on link and clears it when relinked without one", async () => {
+    const token = () => scalar("select github_token_enc as value from public.users where discord_id=$1", [discordId]);
+    await db.query("select public.niki_link_github($1,$2,1234,'octocat','v1.cipher')", [discordId, guildId]);
+    expect(await token()).toBe("v1.cipher");
+    await db.query("select public.niki_link_github($1,$2,1234,'octocat')", [discordId, guildId]);
+    expect(await token()).toBeNull();
+  });
   it("snapshots the GitHub ID used when declaring", async () => {
     const row = await createDeclaration();
     await db.query("select public.niki_link_github($1,$2,9876,'new-account')", [discordId, guildId]);
@@ -141,6 +150,40 @@ describe("leases, retry, and the complete declaration/result loop", () => {
     expect(await store.finishCheck(current, "a".repeat(40))).toBe(true);
     expect(await store.finishCheck(current, "a".repeat(40))).toBe(false);
     expect(await scalar("select count(*)::int as value from public.notifications where kind='result'")).toBe(1);
+  });
+  it("polls before the deadline: success is recognised early, no match never fails", async () => {
+    const row = await createDeclaration();
+    expect(await store.claimCheck()).toBeNull();
+    const due = async () => db.query("update public.declarations set next_check_at=now() where id=$1", [row.id]);
+    await due();
+    const early = (await store.claimCheck())!;
+    expect(await store.finishCheck(early, null, undefined, ["b".repeat(40)])).toBe(true);
+    const waiting = await store.getDeclaration(row.id);
+    expect(waiting).toMatchObject({ status: "pending", judged_shas: ["b".repeat(40)], check_attempts: 0 });
+    expect(Date.parse(waiting.next_check_at as string)).toBeGreaterThan(Date.now() + 25 * 60_000);
+    expect(await scalar("select count(*)::int as value from public.notifications where kind='result'")).toBe(0);
+    await due();
+    expect(await store.finishCheck((await store.claimCheck())!, "a".repeat(40))).toBe(true);
+    expect((await store.getDeclaration(row.id)).status).toBe("succeeded");
+  });
+  it("fails only when the scan began at or after the deadline, and never schedules past it", async () => {
+    const row = await createDeclaration();
+    await db.query("update public.declarations set deadline=now()+interval '3 seconds', next_check_at=now() where id=$1", [row.id]);
+    const early = (await store.claimCheck())!;
+    // The deadline passes right after the claim, while the scan is still running.
+    await db.query("update public.declarations set created_at=now()-interval '1 hour', deadline=lease_until-interval '2 minutes'+interval '1 millisecond' where id=$1", [row.id]);
+    expect(await store.finishCheck(early, null)).toBe(true);
+    expect((await store.getDeclaration(row.id)).status).toBe("pending");
+    await db.query("update public.declarations set next_check_at=now() where id=$1", [row.id]);
+    expect(await store.finishCheck((await store.claimCheck())!, null)).toBe(true);
+    expect((await store.getDeclaration(row.id)).status).toBe("failed");
+  });
+  it("clamps a pre-deadline retry to the deadline", async () => {
+    const row = await createDeclaration();
+    await db.query("update public.declarations set next_check_at=now() where id=$1", [row.id]);
+    await store.retryCheck((await store.claimCheck())!, "boom", 3600);
+    const after = await store.getDeclaration(row.id);
+    expect(Date.parse(after.next_check_at as string)).toBeLessThan(Date.now() + 3600_000);
   });
   it.each(["a".repeat(40), null])("saves achievement/failure and posts once, even on repeated cron runs (%s)", async (sha) => {
     const row = await expiredDeclaration();
@@ -199,8 +242,8 @@ describe("OAuth and database access boundaries", () => {
     expect(await scalar("select has_table_privilege('authenticated','public.oauth_sessions','select') as value")).toBe(false);
     expect(await scalar("select has_function_privilege('anon','public.niki_claim_check()','execute') as value")).toBe(false);
     expect(await scalar("select has_function_privilege('service_role','public.niki_claim_check()','execute') as value")).toBe(true);
-    expect(await scalar("select has_function_privilege('anon','public.niki_finish_check(uuid,uuid,text,text)','execute') as value")).toBe(false);
-    expect(await scalar("select has_function_privilege('service_role','public.niki_finish_check(uuid,uuid,text,text)','execute') as value")).toBe(true);
+    expect(await scalar("select has_function_privilege('anon','public.niki_finish_check(uuid,uuid,text,text,text[])','execute') as value")).toBe(false);
+    expect(await scalar("select has_function_privilege('service_role','public.niki_finish_check(uuid,uuid,text,text,text[])','execute') as value")).toBe(true);
     expect(await scalar("select relrowsecurity as value from pg_class where oid='public.declarations'::regclass")).toBe(true);
   });
 });

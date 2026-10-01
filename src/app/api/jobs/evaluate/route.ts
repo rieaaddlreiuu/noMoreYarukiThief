@@ -1,6 +1,6 @@
 import { env } from "@/lib/config";
 import { createDiscordClient } from "@/lib/discord/client";
-import { findQualifyingCommit } from "@/lib/github";
+import { findCommitWithUserToken } from "@/lib/github";
 import { runJobs } from "@/lib/jobs";
 import { equalSecret, safeError } from "@/lib/security";
 import { createStore } from "@/lib/store";
@@ -20,7 +20,7 @@ export async function POST(request: Request) {
   try {
     const store = createStore();
     await store.cleanup();
-    const counts = await runJobs({ store, findCommit: findQualifyingCommit, deliver: createDiscordClient().deliver });
+    const counts = await runJobs({ store, findCommit: findCommitWithUserToken(store), deliver: createDiscordClient().deliver });
     return Response.json(counts, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
     console.error("Scheduled evaluation failed", safeError(error));
