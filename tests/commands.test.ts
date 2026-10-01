@@ -74,8 +74,28 @@ describe("command scope and permissions", () => {
     const { mocks, deps } = dependencies();
     await handleCommand(interaction("cancel"), deps);
     expect(mocks.cancelDeclaration).toHaveBeenCalledWith(guildId, discordId);
+    mocks.teamStatus.mockResolvedValue({ members: [{ discord_id: discordId, github_login: "octocat" }], declarations: [], pendingNotifications: 0 });
     await handleCommand(interaction("status"), deps);
     expect(mocks.teamStatus).toHaveBeenCalledWith(guildId);
+  });
+  it("filters status to a linked member and rejects unlinked users", async () => {
+    const { mocks, deps } = dependencies();
+    const other = "200000000000000009";
+    mocks.teamStatus.mockResolvedValue({ members: [{ discord_id: discordId, github_login: "octocat" }], declarations: [], pendingNotifications: 0 });
+    const result = await handleCommand(interaction("status", { member: discordId }), deps);
+    expect(result.message.content).toContain(`<@${discordId}>の状況`);
+    await expect(handleCommand(interaction("status", { member: other }), deps)).rejects.toThrow("連携済みのメンバーではありません");
+  });
+  it("defaults status to the caller and shows the whole team only with all:true", async () => {
+    const { mocks, deps } = dependencies();
+    const other = "200000000000000009";
+    mocks.teamStatus.mockResolvedValue({ members: [{ discord_id: discordId, github_login: "octocat" }, { discord_id: other, github_login: "other" }], declarations: [], pendingNotifications: 0 });
+    expect((await handleCommand(interaction("status"), deps)).message.content).toContain(`<@${discordId}>の状況`);
+    expect((await handleCommand(interaction("status", { all: true }), deps)).message.content).toContain("チームの状況");
+    await expect(handleCommand(interaction("status", { all: true, member: other }), deps)).rejects.toThrow("同時に指定できません");
+    mocks.teamStatus.mockResolvedValue({ members: [], declarations: [], pendingNotifications: 0 });
+    await expect(handleCommand(interaction("status"), deps)).rejects.toThrow("まだ連携していません");
+    expect((await handleCommand(interaction("status", { all: true }), deps)).message.content).toContain("チームの状況");
   });
   it("saves a natural-language deadline as UTC", async () => {
     vi.useFakeTimers({ toFake: ["Date"] });

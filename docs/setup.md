@@ -242,7 +242,9 @@ node --env-file=.env.local --input-type=module -e "const r = await fetch(process
 /niki notify reset:true
 /niki cancel
 /niki status
-/niki status page:2
+/niki status member:@メンバー
+/niki status all:true
+/niki status all:true page:2
 ```
 
 - `branch` は省略可能。宣言時点のデフォルトブランチ名を保存します。コミットがまだない空のリポジトリは宣言時に弾きます。
@@ -258,7 +260,8 @@ node --env-file=.env.local --input-type=module -e "const r = await fetch(process
 - 判定待ち・確認エラーを含め、未確定の宣言は1人・1サーバーにつき1件までです。
 - 本人が期限前の宣言だけを取り消せます。取消も通知され、集計には含まれません。
 - コマンドへの応答は本人だけに表示。宣言・取消・結果の通知は設定したチャンネルに公開します。
-- `/niki status` は同じサーバーの宣言・結果・参加者別集計を表示します。各欄5件ずつのページ切替で、集計自体は全履歴を対象にします。確認エラーと投稿待ちも表示します。
+- `/niki status` は省略時に**自分の**宣言・結果・記録を表示します。`member` で他の連携済みメンバーを、`all:true` でサーバー全体（宣言・結果・参加者別集計）を表示します（`member` と `all` は同時指定不可）。各欄5件ずつのページ切替で、集計自体は全履歴を対象にします。確認エラーと投稿待ちも表示します。
+- 注意: 従来の `/niki status`（サーバー全体）は `all:true` を付けた場合の表示に変わりました。反映には `npm run discord:register` でのコマンド再登録が必要です。
 
 ## 7. 判定・再試行の仕様
 

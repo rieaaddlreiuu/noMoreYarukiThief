@@ -63,4 +63,12 @@ describe("Discord output", () => {
     expect(statusMessage(members, rows, 3).content).toContain("3/3");
     expect(statusMessage(members, rows, 100).content).toContain("3/3");
   });
+  it("limits status to one member when memberId is given", () => {
+    const other = "200000000000000009";
+    const rows = [declaration({ status: "succeeded" }), declaration({ discord_id: other, status: "failed" })];
+    const message = statusMessage([{ discord_id: discordId, github_login: "octocat" }, { discord_id: other, github_login: "other" }], rows, 1, 0, new Date(), discordId);
+    expect(message.content).toContain(`<@${discordId}>の状況`);
+    expect(message.content).toContain("達成 1件 / 未達成 0件");
+    expect(message.embeds!.map((e) => e.description).join()).not.toContain(other);
+  });
 });

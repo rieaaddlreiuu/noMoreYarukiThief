@@ -73,8 +73,14 @@ export async function handleCommand(interaction: Interaction, deps: CommandDepen
   }
 
   const page = z.number().int().min(1).max(1_000_000).default(1).parse(options.page);
+  const all = options.all === true;
+  if (all && options.member !== undefined) throw new UserError("memberとallは同時に指定できません。");
+  const memberId = all ? undefined : options.member === undefined ? discordId : snowflake.parse(options.member);
   const data = await deps.store.teamStatus(guildId);
-  return { message: statusMessage(data.members, data.declarations, page, data.pendingNotifications) };
+  if (memberId && !data.members.some((m) => m.discord_id === memberId)) {
+    throw new UserError(memberId === discordId ? "あなたはまだ連携していません。/niki github で連携してください。チーム全体は /niki status all:true で見られます。" : "そのユーザーはこのサーバーで連携済みのメンバーではありません。");
+  }
+  return { message: statusMessage(data.members, data.declarations, page, data.pendingNotifications, new Date(), memberId) };
 }
 
 export function commandErrorMessage(error: unknown): string {

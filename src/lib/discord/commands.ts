@@ -18,6 +18,8 @@ export const nikiCommand = {
     { type: 1, name: "cancel", description: "自分の期限前の宣言を取り消す" },
     { type: 1, name: "status", description: "チームの宣言・結果・達成率・連続達成日数を見る", options: [
       { type: 4, name: "page", description: "表示するページ", min_value: 1, max_value: 1000000 },
+      { type: 6, name: "member", description: "このメンバーの状況を見る（省略時は自分）" },
+      { type: 5, name: "all", description: "trueでサーバー全体の状況を見る" },
     ] },
   ],
 };
