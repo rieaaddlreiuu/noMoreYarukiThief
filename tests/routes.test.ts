@@ -1,4 +1,4 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { NextRequest } from "next/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applicationId, channelId, discordId, guildId } from "./fixtures";
@@ -9,7 +9,7 @@ const mocks = vi.hoisted(() => ({
 }));
 vi.mock("next/server", async (importOriginal) => ({ ...await importOriginal<typeof import("next/server")>(), after: mocks.after }));
 vi.mock("../src/lib/store", () => ({ createStore: mocks.createStore }));
-vi.mock("../src/lib/github", () => ({ validateRepository: vi.fn(), findQualifyingCommit: vi.fn(), exchangeGitHubCode: mocks.exchangeGitHubCode }));
+vi.mock("../src/lib/github", () => ({ validateRepository: vi.fn(), findQualifyingCommit: vi.fn(), findCommitWithUserToken: vi.fn(), exchangeGitHubCode: mocks.exchangeGitHubCode }));
 vi.mock("../src/lib/jobs", () => ({ runJobs: mocks.runJobs, dispatchNotifications: vi.fn() }));
 vi.mock("../src/lib/discord/client", () => ({ createDiscordClient: () => ({ assertMember: mocks.assertMember, deliver: vi.fn(), editReply: mocks.editReply }) }));
 
@@ -18,6 +18,7 @@ import { POST as jobsPost } from "../src/app/api/jobs/evaluate/route";
 import { GET as oauthStart, HEAD as oauthStartHead, POST as oauthStartPost } from "../src/app/api/github/start/route";
 import { GET as oauthCallback } from "../src/app/api/github/callback/route";
 import { oauthCookieName } from "../src/lib/oauth-response";
+import { decryptToken } from "../src/lib/security";
 
 beforeEach(() => {
   mocks.createStore.mockReturnValue({ cleanup: mocks.cleanup, beginOAuth: mocks.beginOAuth, consumeOAuth: mocks.consumeOAuth, linkGitHub: mocks.linkGitHub });
@@ -169,13 +170,24 @@ describe("GitHub OAuth routes", () => {
   });
   it("links the revalidated GitHub identity to the stored Discord user/guild only", async () => {
     mocks.consumeOAuth.mockResolvedValue({ discord_id: discordId, guild_id: guildId, code_verifier: "verifier" });
-    mocks.exchangeGitHubCode.mockResolvedValue({ id: 1234, login: "octocat" });
+    mocks.exchangeGitHubCode.mockResolvedValue({ id: 1234, login: "octocat", token: "gho_user" });
     const response = await oauthCallback(callback());
     expect(response.status).toBe(200);
     expect(mocks.exchangeGitHubCode).toHaveBeenCalledWith("code", "verifier");
     expect(mocks.assertMember).toHaveBeenCalledWith(guildId, discordId);
-    expect(mocks.linkGitHub).toHaveBeenCalledWith(discordId, guildId, 1234, "octocat");
+    expect(mocks.linkGitHub).toHaveBeenCalledWith(discordId, guildId, 1234, "octocat", null);
     expect(response.headers.get("set-cookie")).toContain("Max-Age=0");
+  });
+  it("stores only the encrypted token when TOKEN_ENCRYPTION_KEY is set", async () => {
+    const key = randomBytes(32);
+    vi.stubEnv("TOKEN_ENCRYPTION_KEY", key.toString("base64"));
+    mocks.consumeOAuth.mockResolvedValue({ discord_id: discordId, guild_id: guildId, code_verifier: "verifier" });
+    mocks.exchangeGitHubCode.mockResolvedValue({ id: 1234, login: "octocat", token: "gho_user" });
+    expect((await oauthCallback(callback())).status).toBe(200);
+    const stored = mocks.linkGitHub.mock.calls.at(-1)![4] as string;
+    expect(stored).not.toContain("gho_user");
+    expect(decryptToken(stored, key)).toBe("gho_user");
+    vi.unstubAllEnvs();
   });
   it("rejects replay and treats denied authorization as a cancellation", async () => {
     mocks.consumeOAuth.mockResolvedValueOnce(null);

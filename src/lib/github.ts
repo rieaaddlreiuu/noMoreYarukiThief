@@ -4,10 +4,13 @@ import { z } from "zod";
 import { judgeCommits } from "./ai";
 import { appOrigin, env } from "./config";
 import { type Declaration, UserError } from "./domain";
+import type { CheckResult } from "./jobs";
+import { decryptToken, parseTokenKey } from "./security";
 
-export function githubClient() {
+// A user's own token (when linked) spreads rate limits per user; the operator token is the fallback.
+export function githubClient(userToken?: string) {
   return new Octokit({
-    auth: process.env.GITHUB_API_TOKEN || undefined,
+    auth: userToken || process.env.GITHUB_API_TOKEN || undefined,
     userAgent: "nomoreyarukithief-mvp",
     request: { timeout: 8_000 },
     log: { debug() {}, info() {}, warn() {}, error() {} },
@@ -47,7 +50,7 @@ export function matchesDeclaration(commit: CommitCandidate, declaration: Declara
   return date >= Date.parse(declaration.created_at) && date <= Date.parse(declaration.deadline);
 }
 
-export async function findQualifyingCommit(declaration: Declaration, signal: AbortSignal, client = githubClient()): Promise<{ sha: string; aiReason?: string } | null> {
+export async function findQualifyingCommit(declaration: Declaration, signal: AbortSignal, client = githubClient()): Promise<CheckResult | null> {
   const [owner, repo] = declaration.repository.split("/");
   const request = { signal };
   // A formerly public repository becoming private is a verification error, never a failure.
@@ -74,13 +77,34 @@ export async function findQualifyingCommit(declaration: Declaration, signal: Abo
   if (candidates.length === 0) return null;
   if (!process.env.GEMINI_API_KEY) return { sha: candidates[0].sha };
 
+  // Polling before the deadline sees the same candidates again; only judge when a new one has appeared.
+  if (candidates.every((c) => declaration.judged_shas?.includes(c.sha))) return null;
   const verdict = await judgeCommits(
     declaration.content,
     candidates.map((c) => ({ sha: c.sha.slice(0, 7), message: c.commit.message })),
     signal,
   );
-  if (!verdict) return null;
+  if (!verdict) return { sha: null, judged: candidates.map((c) => c.sha) };
   return { sha: candidates[verdict.index].sha, aiReason: verdict.reason };
+}
+
+type TokenStore = { getGitHubToken(discordId: string): Promise<string | null>; clearGitHubToken(discordId: string): Promise<void> };
+
+// Checks a declaration with its owner's stored token. A revoked token (401) is dropped and the operator token takes over.
+export function findCommitWithUserToken(store: TokenStore, find = findQualifyingCommit) {
+  return async (declaration: Declaration, signal: AbortSignal) => {
+    const key = parseTokenKey(process.env.TOKEN_ENCRYPTION_KEY);
+    const stored = key ? await store.getGitHubToken(declaration.discord_id).catch(() => null) : null;
+    const token = key && stored ? decryptToken(stored, key) : null;
+    if (!token) return find(declaration, signal);
+    try {
+      return await find(declaration, signal, githubClient(token));
+    } catch (error) {
+      if (!(error && typeof error === "object" && "status" in error && error.status === 401)) throw error;
+      await store.clearGitHubToken(declaration.discord_id).catch(() => {});
+      return find(declaration, signal);
+    }
+  };
 }
 
 export async function exchangeGitHubCode(code: string, verifier: string) {
@@ -98,6 +122,7 @@ export async function exchangeGitHubCode(code: string, verifier: string) {
     signal, cache: "no-store",
   });
   if (!identity.ok) throw new Error("GitHub identity check failed");
-  // The user token is only used here. It is never stored in the DB or in a cookie.
-  return z.object({ id: z.number().int().positive().safe(), login: z.string().min(1) }).parse(await identity.json());
+  // The caller encrypts the token before storing it; it must never reach a cookie or a log.
+  const user = z.object({ id: z.number().int().positive().safe(), login: z.string().min(1) }).parse(await identity.json());
+  return { ...user, token: token.access_token };
 }

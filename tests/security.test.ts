@@ -1,6 +1,6 @@
-import { generateKeyPairSync, sign } from "node:crypto";
+import { generateKeyPairSync, randomBytes, sign } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { equalSecret, hashToken, pkceChallenge, randomToken, safeError, verifyDiscordRequest } from "../src/lib/security";
+import { decryptToken, encryptToken, equalSecret, hashToken, parseTokenKey, pkceChallenge, randomToken, safeError, verifyDiscordRequest } from "../src/lib/security";
 import { BOT_PERMISSIONS, canSetup, channelPermissions } from "../src/lib/discord/permissions";
 import { guildId, applicationId } from "./fixtures";
 
@@ -28,6 +28,28 @@ it("uses opaque hashed tokens and standard S256 PKCE", () => {
   expect(equalSecret("a", "ab")).toBe(false);
   expect(safeError(Object.assign(new Error("TOKEN_SECRET"), { status: 429 }))).toBe("External API HTTP 429");
   expect(safeError(new Error("TOKEN_SECRET"))).not.toContain("TOKEN_SECRET");
+});
+
+describe("token encryption", () => {
+  const key = randomBytes(32);
+  it("round-trips and never leaks the plaintext", () => {
+    const encrypted = encryptToken("gho_secret", key);
+    expect(encrypted).not.toContain("gho_secret");
+    expect(encrypted).not.toBe(encryptToken("gho_secret", key));
+    expect(decryptToken(encrypted, key)).toBe("gho_secret");
+  });
+  it("returns null for a wrong key, tampering, or malformed input", () => {
+    const encrypted = encryptToken("gho_secret", key);
+    expect(decryptToken(encrypted, randomBytes(32))).toBeNull();
+    expect(decryptToken(encrypted.slice(0, -2) + "AA", key)).toBeNull();
+    expect(decryptToken("plain", key)).toBeNull();
+    expect(decryptToken("v2.a.b.c", key)).toBeNull();
+  });
+  it("accepts only a 32 byte base64 key", () => {
+    expect(parseTokenKey(key.toString("base64"))?.equals(key)).toBe(true);
+    expect(parseTokenKey(undefined)).toBeNull();
+    expect(parseTokenKey(randomBytes(16).toString("base64"))).toBeNull();
+  });
 });
 
 describe("Discord permission boundaries", () => {

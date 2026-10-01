@@ -8,7 +8,7 @@ export type OAuthSession = { discord_id: string; guild_id: string; code_verifier
 
 export interface JobStore {
   claimCheck(): Promise<Declaration | null>;
-  finishCheck(row: Declaration, sha: string | null, aiReason?: string): Promise<boolean>;
+  finishCheck(row: Declaration, sha: string | null, aiReason?: string, judged?: string[]): Promise<boolean>;
   retryCheck(row: Declaration, error: string, delay: number): Promise<void>;
   claimNotification(declarationId?: string): Promise<Notification | null>;
   getDeclaration(id: string): Promise<Declaration>;
@@ -68,10 +68,17 @@ export function createStore() {
     consumeOAuth(stateHash: string, browserHash: string) {
       return first(rpc<OAuthSession[]>("niki_consume_oauth", { p_state_hash: stateHash, p_browser_hash: browserHash }));
     },
-    async linkGitHub(discordId: string, guildId: string, githubId: number, login: string) {
-      const { error } = await db.rpc("niki_link_github", { p_discord_id: discordId, p_guild_id: guildId, p_github_id: githubId, p_login: login });
+    async linkGitHub(discordId: string, guildId: string, githubId: number, login: string, tokenEnc: string | null = null) {
+      const { error } = await db.rpc("niki_link_github", { p_discord_id: discordId, p_guild_id: guildId, p_github_id: githubId, p_login: login, p_token_enc: tokenEnc });
       if (error?.code === "23505") throw new UserError("このGitHubアカウントは別のDiscordユーザーと連携済みです。");
       if (error) throw new Error("Could not save GitHub link");
+    },
+    async getGitHubToken(discordId: string) {
+      const row = await query<{ github_token_enc: string | null } | null>(db.from("users").select("github_token_enc").eq("discord_id", discordId).maybeSingle());
+      return row?.github_token_enc ?? null;
+    },
+    async clearGitHubToken(discordId: string) {
+      await query(db.from("users").update({ github_token_enc: null }).eq("discord_id", discordId));
     },
     async createDeclaration(input: { interactionId: string; guildId: string; discordId: string; content: string; repository: string; branch: string; deadline: string }) {
       const result = await db.rpc("niki_create_declaration", {
@@ -103,8 +110,8 @@ export function createStore() {
     },
     cleanup() { return rpc<void>("niki_cleanup"); },
     claimCheck() { return first(rpc<Declaration[]>("niki_claim_check")); },
-    finishCheck(row: Declaration, sha: string | null, aiReason?: string) {
-      return rpc<boolean>("niki_finish_check", { p_id: row.id, p_lease: row.lease_token, p_sha: sha, p_ai_reason: aiReason ?? null });
+    finishCheck(row: Declaration, sha: string | null, aiReason?: string, judged?: string[]) {
+      return rpc<boolean>("niki_finish_check", { p_id: row.id, p_lease: row.lease_token, p_sha: sha, p_ai_reason: aiReason ?? null, p_judged: judged ?? null });
     },
     retryCheck(row: Declaration, error: string, delay: number) {
       return rpc<void>("niki_retry_check", { p_id: row.id, p_lease: row.lease_token, p_error: error, p_delay: delay });
