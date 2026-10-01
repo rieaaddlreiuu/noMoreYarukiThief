@@ -28,7 +28,8 @@ export function createStore() {
       if (error.message.includes("LINK_REQUIRED")) throw new UserError("先に /niki github でGitHubを連携してください。");
       if (error.message.includes("SETUP_REQUIRED")) throw new UserError("管理者が先に /niki setup を実行してください。");
       if (error.message.includes("FUTURE_DEADLINE_REQUIRED")) throw new UserError("期限が過ぎました。現在より後の期限を入力してください。");
-      // Never expose PostgREST details, SQL values, or credentials to Discord/logs.
+      // Never expose PostgREST details, SQL values, or credentials to Discord/logs; only the code is logged.
+      console.error("[db] operation failed", { code: error.code ?? "unknown" });
       throw new Error(`Database operation failed (${error.code ?? "unknown"})`);
     }
     return data as T;

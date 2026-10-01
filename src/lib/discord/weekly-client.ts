@@ -14,6 +14,14 @@ export async function deliverWeekly(row: WeeklyReport, signal: AbortSignal): Pro
     });
     if (!response.ok) {
       const error = await response.json().catch(() => ({}));
+      console.error("[discord:weekly] http error", {
+        method: body === undefined ? "GET" : "POST",
+        path: path.replace(/[^/?]{25,}/g, ":masked"),
+        status: response.status,
+        code: error.code,
+        message: typeof error.message === "string" ? error.message.slice(0, 200) : undefined,
+        retryAfter: error.retry_after,
+      });
       throw new DiscordApiError(response.status, typeof error.retry_after === "number" ? Math.ceil(error.retry_after) : 60);
     }
     return response.json() as Promise<T>;

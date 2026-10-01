@@ -22,6 +22,15 @@ export function createDiscordClient() {
     });
     if (!response.ok) {
       const body = await response.json().catch(() => ({}));
+      // Webhook paths embed the interaction token, so long segments are masked.
+      console.error("[discord] http error", {
+        method: options.method ?? "GET",
+        path: path.replace(/[^/?]{25,}/g, ":masked"),
+        status: response.status,
+        code: body.code,
+        message: typeof body.message === "string" ? body.message.slice(0, 200) : undefined,
+        retryAfter: body.retry_after,
+      });
       throw new DiscordApiError(response.status, typeof body.retry_after === "number" ? Math.ceil(body.retry_after) : 60);
     }
     return response.json() as Promise<T>;

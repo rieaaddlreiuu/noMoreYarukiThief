@@ -27,10 +27,13 @@ export async function GET(request: NextRequest) {
     if (request.nextUrl.searchParams.has("error")) return finish("GitHub連携を中止しました", "アカウントは変更していません。", 400);
     const code = request.nextUrl.searchParams.get("code");
     if (!code || code.length > 512) return finish("認可コードが無効です", "Discordで /niki github を再実行してください。", 400);
+    console.log("[oauth:callback] session consumed; exchanging code");
     const identity = await exchangeGitHubCode(code, session.code_verifier);
+    console.log("[oauth:callback] code exchanged", { githubId: identity.id });
     await createDiscordClient().assertMember(session.guild_id, session.discord_id);
     // Without TOKEN_ENCRYPTION_KEY the token is simply not kept and checks use the operator token.
     const key = parseTokenKey(process.env.TOKEN_ENCRYPTION_KEY);
+    console.log("[oauth:callback] member verified; linking", { encrypting: Boolean(key) });
     await store.linkGitHub(session.discord_id, session.guild_id, identity.id, identity.login, key ? encryptToken(identity.token, key) : null);
     return finish("GitHubを連携しました", `${identity.login} と連携しました。Discordに戻り、/niki declare で開発内容を宣言できます。`);
   } catch (error) {

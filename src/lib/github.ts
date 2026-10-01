@@ -74,17 +74,30 @@ export async function findQualifyingCommit(declaration: Declaration, signal: Abo
   // Never report failure when pagination was incomplete.
   if (!scanComplete) throw new Error("Commit scan limit reached");
 
+  const hasGeminiKey = Boolean(process.env.GEMINI_API_KEY);
+  const alreadyJudged = candidates.filter((c) => declaration.judged_shas?.includes(c.sha)).length;
+  console.log("[github] scan done", { declarationId: declaration.id, candidates: candidates.length, alreadyJudged, hasGeminiKey });
   if (candidates.length === 0) return null;
-  if (!process.env.GEMINI_API_KEY) return { sha: candidates[0].sha };
+  if (!hasGeminiKey) {
+    console.warn("[github] GEMINI_API_KEY missing: skipping AI judgement, adopting first candidate", { declarationId: declaration.id });
+    return { sha: candidates[0].sha };
+  }
 
   // Polling before the deadline sees the same candidates again; only judge when a new one has appeared.
-  if (candidates.every((c) => declaration.judged_shas?.includes(c.sha))) return null;
+  if (candidates.every((c) => declaration.judged_shas?.includes(c.sha))) {
+    console.log("[github] all candidates already judged: skipping AI", { declarationId: declaration.id });
+    return null;
+  }
   const verdict = await judgeCommits(
     declaration.content,
     candidates.map((c) => ({ sha: c.sha.slice(0, 7), message: c.commit.message })),
     signal,
   );
-  if (!verdict) return { sha: null, judged: candidates.map((c) => c.sha) };
+  if (!verdict) {
+    console.log("[github] AI rejected all candidates", { declarationId: declaration.id, candidates: candidates.length });
+    return { sha: null, judged: candidates.map((c) => c.sha) };
+  }
+  console.log("[github] AI matched commit", { declarationId: declaration.id, sha: candidates[verdict.index].sha.slice(0, 7) });
   return { sha: candidates[verdict.index].sha, aiReason: verdict.reason };
 }
 
@@ -94,13 +107,25 @@ type TokenStore = { getGitHubToken(discordId: string): Promise<string | null>; c
 export function findCommitWithUserToken(store: TokenStore, find = findQualifyingCommit) {
   return async (declaration: Declaration, signal: AbortSignal) => {
     const key = parseTokenKey(process.env.TOKEN_ENCRYPTION_KEY);
-    const stored = key ? await store.getGitHubToken(declaration.discord_id).catch(() => null) : null;
+    const stored = key ? await store.getGitHubToken(declaration.discord_id).catch((error) => {
+      console.error("[github] getGitHubToken failed", { declarationId: declaration.id, name: error?.name });
+      return null;
+    }) : null;
     const token = key && stored ? decryptToken(stored, key) : null;
+    console.log("[github] token route", {
+      declarationId: declaration.id,
+      hasKey: Boolean(key),
+      hasStored: Boolean(stored),
+      decrypted: Boolean(token),
+      using: token ? "user" : "operator",
+      hasOperatorToken: Boolean(process.env.GITHUB_API_TOKEN),
+    });
     if (!token) return find(declaration, signal);
     try {
       return await find(declaration, signal, githubClient(token));
     } catch (error) {
       if (!(error && typeof error === "object" && "status" in error && error.status === 401)) throw error;
+      console.warn("[github] user token rejected (401): clearing and falling back to operator token", { declarationId: declaration.id });
       await store.clearGitHubToken(declaration.discord_id).catch(() => {});
       return find(declaration, signal);
     }

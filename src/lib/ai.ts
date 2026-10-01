@@ -13,11 +13,19 @@ export async function judgeCommits(
     signal: AbortSignal,
 ): Promise<{index: number; reason: string} | null> {
     const apiKey = process.env.GEMINI_API_KEY;
+    const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
+    console.log("[gemini] request start", {
+        model,
+        modelFromEnv: Boolean(process.env.GEMINI_MODEL),
+        hasApiKey: Boolean(apiKey),
+        candidates: candidates.length,
+        contentLength: content.length,
+    });
     if (!apiKey) throw new Error("GEMINI_API_KEY is not configured.");
 
     const list = candidates.map((c, i) => `[${i}] ${c.sha}: ${c.message}`).join("\n");
 
-    const model = process.env.GEMINI_MODEL || "gemini-3.1-flash-lite";
+    const startedAt = Date.now();
     const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`,
         {
             method: "POST",
@@ -49,21 +57,58 @@ export async function judgeCommits(
         },
     );
 
+    const elapsedMs = Date.now() - startedAt;
     if (!response.ok) {
+        // 429 / 400 (schema) / 403 (key) / 404 (model) are told apart by status and body.
+        const errorBody = await response.text().catch(() => "");
+        console.error("[gemini] http error", { model, status: response.status, elapsedMs, body: errorBody.slice(0, 500) });
         throw new GeminiApiError(response.status);
     }
 
     const body = await response.json();
-    const text = body.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (typeof text !== "string") throw new Error("Unexpected Gemini response shape");
+    const first = body.candidates?.[0];
+    const parts = first?.content?.parts;
+    console.log("[gemini] response received", {
+        elapsedMs,
+        candidates: body.candidates?.length ?? 0,
+        finishReason: first?.finishReason,
+        blockReason: body.promptFeedback?.blockReason,
+        parts: Array.isArray(parts) ? parts.length : null,
+        partKeys: Array.isArray(parts) ? parts.map((p: Record<string, unknown>) => Object.keys(p).join("+")) : null,
+        usage: body.usageMetadata,
+    });
+    const text = parts?.[0]?.text;
+    if (typeof text !== "string") {
+        console.error("[gemini] unexpected response shape", { bodyKeys: Object.keys(body ?? {}), finishReason: first?.finishReason, blockReason: body.promptFeedback?.blockReason });
+        throw new Error("Unexpected Gemini response shape");
+    }
 
-    const verdict = z.object({
+    let json: unknown;
+    try {
+        json = JSON.parse(text);
+    } catch (error) {
+        console.error("[gemini] JSON.parse failed", { textLength: text.length, head: text.slice(0, 200), finishReason: first?.finishReason });
+        throw error;
+    }
+    const parsed = z.object({
         matchedIndex: z.number().int().nullable(),
         reason: z.string().max(200),
-    }).parse(JSON.parse(text));
+    }).safeParse(json);
+    if (!parsed.success) {
+        console.error("[gemini] schema validation failed", { issues: parsed.error.issues.map((i) => ({ path: i.path, code: i.code })), head: text.slice(0, 200) });
+        throw parsed.error;
+    }
+    const verdict = parsed.data;
 
-    if (verdict.matchedIndex === null) return null;
-    if (verdict.matchedIndex < 0 || verdict.matchedIndex >= candidates.length) return null;
+    if (verdict.matchedIndex === null) {
+        console.log("[gemini] verdict: no match", { candidates: candidates.length, reasonLength: verdict.reason.length });
+        return null;
+    }
+    if (verdict.matchedIndex < 0 || verdict.matchedIndex >= candidates.length) {
+        console.warn("[gemini] verdict index out of range (treated as no match)", { matchedIndex: verdict.matchedIndex, candidates: candidates.length });
+        return null;
+    }
+    console.log("[gemini] verdict: matched", { matchedIndex: verdict.matchedIndex, candidates: candidates.length });
     return { index: verdict.matchedIndex, reason: verdict.reason };
 }
 
