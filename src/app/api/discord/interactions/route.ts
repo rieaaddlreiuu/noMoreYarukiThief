@@ -15,7 +15,11 @@ async function processInteraction(interaction: Interaction) {
   let declarationId: string | undefined;
   try {
     const store = createStore();
-    if (!await store.claimInteraction(interaction.id)) return;
+    if (!await store.claimInteraction(interaction.id)) {
+      console.log("[interaction] duplicate, ignored", { id: interaction.id });
+      return;
+    }
+    console.log("[interaction] processing", { id: interaction.id });
     const result = await handleCommand(interaction, { store, discord, origin: appOrigin, validateRepository });
     declarationId = result.declarationId;
     await discord.editReply(interaction.application_id, interaction.token, result.message);
@@ -38,12 +42,16 @@ export async function POST(request: Request) {
   if (Number(request.headers.get("content-length")) > 65_536) return new Response("Too large", { status: 413 });
   const body = await request.text();
   if (Buffer.byteLength(body) > 65_536) return new Response("Too large", { status: 413 });
-  if (!await verifyDiscordRequest(body, request.headers, publicKey)) return new Response("Invalid signature", { status: 401 });
+  if (!await verifyDiscordRequest(body, request.headers, publicKey)) {
+    console.warn("[interaction] invalid signature");
+    return new Response("Invalid signature", { status: 401 });
+  }
   let payload: unknown;
   try { payload = JSON.parse(body); }
   catch { return new Response("Invalid JSON", { status: 400 }); }
   if (payload && typeof payload === "object" && "type" in payload && payload.type === 1) return Response.json({ type: 1 });
   const parsed = interactionSchema.safeParse(payload);
+  if (!parsed.success) console.warn("[interaction] schema mismatch", { issues: parsed.error.issues.map((i) => i.path.join(".")) });
   if (!parsed.success) return Response.json({ type: 4, data: { content: "サーバー内で /niki コマンドを実行してください。", flags: 64, allowed_mentions: { parse: [] } } });
   if (parsed.data.application_id !== process.env.DISCORD_APPLICATION_ID) return new Response("Wrong application", { status: 401 });
   // All database/API work runs after the response to meet Discord's 3-second acknowledgement limit.

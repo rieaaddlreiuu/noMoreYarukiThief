@@ -24,6 +24,17 @@ async function checkOne(deps: JobDependencies, row: Declaration, deadline: numbe
     const result = await deps.findCommit(row, AbortSignal.timeout(Math.max(1, Math.min(20_000, deadline - Date.now()))));
     return await deps.store.finishCheck(row, result?.sha ?? null, result?.aiReason, result?.judged) ? "checked" : "stale";
   } catch (error) {
+    // safeError flattens the cause; log the raw type and status first so Gemini and GitHub failures can be told apart.
+    const e = error as { name?: string; status?: number; message?: string } | null;
+    console.error("[jobs] check failed", {
+      declarationId: row.id,
+      attempts: row.check_attempts,
+      type: e?.constructor?.name,
+      name: e?.name,
+      status: e?.status,
+      message: e?.message?.slice(0, 200),
+      retryInSec: delayFor(error, row.check_attempts),
+    });
     await deps.store.retryCheck(row, safeError(error), delayFor(error, row.check_attempts));
     return "checkRetry";
   }
@@ -35,6 +46,14 @@ async function notifyOne(deps: Pick<JobDependencies, "store" | "deliver">, row: 
     const messageId = await deps.deliver(row, declaration, AbortSignal.timeout(Math.max(1, Math.min(20_000, deadline - Date.now()))));
     return await deps.store.finishNotification(row, messageId) ? "notified" : "stale";
   } catch (error) {
+    const e = error as { name?: string; status?: number; message?: string } | null;
+    console.error("[jobs] notification failed", {
+      notificationId: row.id,
+      attempts: row.attempts,
+      type: e?.constructor?.name,
+      status: e?.status,
+      message: e?.message?.slice(0, 200),
+    });
     await deps.store.retryNotification(row, safeError(error), delayFor(error, row.attempts));
     return "notificationRetry";
   }
@@ -51,6 +70,7 @@ export async function runJobs(deps: JobDependencies, { budgetMs = 40_000, maxRou
     if (notification) counts[await notifyOne(deps, notification, deadline)]++;
     if (!check && !notification) break;
   }
+  console.log("[jobs] runJobs finished", { ...counts, elapsedMs: budgetMs - (deadline - Date.now()) });
   return counts;
 }
 

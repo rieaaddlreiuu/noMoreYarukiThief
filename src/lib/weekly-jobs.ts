@@ -10,7 +10,9 @@ export async function runWeeklyJobs(deps: {
   const week = previousWeek(now);
   const counts = { prepared: 0, sent: 0, retry: 0, stale: 0 };
   // No posting of the just-ended week before Monday 09:00 JST. Older retries can still drain.
-  if (now.getTime() >= Date.parse(week.dueAt)) counts.prepared = await deps.store.prepare(week.weekStart);
+  const due = now.getTime() >= Date.parse(week.dueAt);
+  console.log("[weekly] run", { weekStart: week.weekStart, dueAt: week.dueAt, due });
+  if (due) counts.prepared = await deps.store.prepare(week.weekStart);
   for (let i = 0; i < 10 && Date.now() < until - 10_000; i++) {
     const row = await deps.store.claim();
     if (!row) break;
@@ -19,6 +21,8 @@ export async function runWeeklyJobs(deps: {
       if (await deps.store.finish(row, id)) counts.sent++;
       else counts.stale++;
     } catch (error) {
+      const e = error as { name?: string; status?: number; message?: string } | null;
+      console.error("[weekly] delivery failed", { attempts: row.attempts, type: e?.constructor?.name, status: e?.status, message: e?.message?.slice(0, 200) });
       const requested = error && typeof error === "object" && "retryAfter" in error ? Number(error.retryAfter) : 0;
       await deps.store.retry(row, safeError(error), Math.max(retryDelay(row.attempts), Number.isFinite(requested) ? requested : 0));
       counts.retry++;
