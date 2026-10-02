@@ -33,6 +33,7 @@ export const nikiLines: Record<NikiScene, ((w: NikiWords) => string)[]> = {
     (w) => `${w.name}の草がまた伸びた。いい芝だ、この調子で育てていけ。`,
     (w) => `宣言して、やった。それだけのことが一番難しいんだ。よくやった、${w.name}。`,
     (w) => `「${w.content}」完了。${w.name}、今日のメシはうまいぞ。`,
+    (w) => `${w.name}、宣言して、期限前に片付けた。仕事ができるやつの動きだな。`,
   ],
   failed: [
     (w) => `${w.name}……「${w.content}」はどこ行った？俺のところには何も届いてねぇぞ。`,

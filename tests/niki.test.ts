@@ -19,20 +19,21 @@ const succeededLines = [
   `${mention}の草がまた伸びた。いい芝だ、この調子で育てていけ。`,
   `宣言して、やった。それだけのことが一番難しいんだ。よくやった、${mention}。`,
   `「ログイン画面を実装する」完了。${mention}、今日のメシはうまいぞ。`,
+  `${mention}、宣言して、期限前に片付けた。仕事ができるやつの動きだな。`,
 ];
 
 describe("Niki's lines", () => {
   it("has the agreed number of lines per scene", () => {
-    expect(Object.fromEntries(scenes.map((scene) => [scene, nikiLines[scene].length]))).toEqual({ declared: 4, cancelled: 3, succeeded: 6, failed: 6, checkError: 1 });
+    expect(Object.fromEntries(scenes.map((scene) => [scene, nikiLines[scene].length]))).toEqual({ declared: 4, cancelled: 3, succeeded: 7, failed: 6, checkError: 1 });
   });
-  it("posts one of the six success lines", () => {
+  it("posts one of the seven success lines", () => {
     for (let i = 0; i < 50; i++) expect(succeededLines).toContain(message("result", "succeeded").content);
   });
   it("selects a line from an injected random source", () => {
     expect(message("result", "succeeded", () => 0).content).toBe(succeededLines[0]);
-    expect(message("result", "succeeded", () => 0.999).content).toBe(succeededLines[5]);
-    expect(message("result", "succeeded", () => 1).content).toBe(succeededLines[5]);
-    expect(succeededLines.map((_, i) => message("result", "succeeded", pick(i, 6)).content)).toEqual(succeededLines);
+    expect(message("result", "succeeded", () => 0.999).content).toBe(succeededLines[6]);
+    expect(message("result", "succeeded", () => 1).content).toBe(succeededLines[6]);
+    expect(succeededLines.map((_, i) => message("result", "succeeded", pick(i, 7)).content)).toEqual(succeededLines);
   });
   it("fills in the name, content and deadline without leaving placeholders", () => {
     for (const scene of scenes) {
