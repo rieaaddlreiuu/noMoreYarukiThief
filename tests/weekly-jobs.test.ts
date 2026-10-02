@@ -9,16 +9,11 @@ function dependencies() {
     finish: vi.fn().mockResolvedValue(true), retry: vi.fn().mockResolvedValue(undefined) };
   return { store, deliver: vi.fn().mockResolvedValue("message") };
 }
-it("prepares at Monday 09:00 JST, but never earlier", async () => {
-  const early = dependencies();
-  vi.mocked(early.store.claim).mockReset().mockResolvedValue(null);
-  await runWeeklyJobs(early, new Date("2026-10-04T23:59:59.999Z"));
-  expect(early.store.prepare).not.toHaveBeenCalled();
-  expect(early.deliver).not.toHaveBeenCalled();
-  const due = dependencies();
-  expect(await runWeeklyJobs(due, new Date("2026-10-05T00:00:00Z"))).toEqual({ prepared: 1, sent: 1, retry: 0, stale: 0 });
-  expect(due.store.prepare).toHaveBeenCalledWith("2026-09-28");
-  expect(due.store.finish).toHaveBeenCalledWith(row, "message");
+it("always prepares the previous week and leaves each server's delivery time to the database", async () => {
+  const deps = dependencies();
+  expect(await runWeeklyJobs(deps, new Date("2026-10-09T09:00:00Z"))).toEqual({ prepared: 1, sent: 1, retry: 0, stale: 0 });
+  expect(deps.store.prepare).toHaveBeenCalledWith("2026-09-28");
+  expect(deps.store.finish).toHaveBeenCalledWith(row, "message");
 });
 it("continues to other reports after a delivery error, sanitizing saved errors", async () => {
   const deps = dependencies();

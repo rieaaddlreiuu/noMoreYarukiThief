@@ -5,14 +5,14 @@ import type { Store } from "../store";
 import { hashToken, randomToken } from "../security";
 import type { DiscordClient } from "./client";
 import { canSetup } from "./permissions";
-import { type Message, statusMessage } from "./messages";
+import { type Message, statusMessage, weeklyScheduleMessage } from "./messages";
 
 export const interactionSchema = z.object({
   id: snowflake, application_id: snowflake, type: z.literal(2), token: z.string().min(1).max(512),
   guild_id: snowflake, channel_id: snowflake,
   member: z.object({ user: z.object({ id: snowflake }), permissions: z.string().regex(/^\d+$/) }),
   data: z.object({ name: z.literal("niki"), options: z.array(z.object({
-    name: z.enum(["setup", "github", "declare", "notify", "cancel", "status"]), type: z.literal(1),
+    name: z.enum(["setup", "weekly", "github", "declare", "notify", "cancel", "status"]), type: z.literal(1),
     options: z.array(z.object({ name: z.string(), type: z.number(), value: z.union([z.string(), z.number(), z.boolean()]) })).optional(),
   })).length(1) }),
 });
@@ -38,6 +38,19 @@ export async function handleCommand(interaction: Interaction, deps: CommandDepen
   }
 
   await deps.store.requireSetup(guildId);
+  if (command.name === "weekly") {
+    if (!canSetup(interaction.member.permissions)) throw new UserError("週次サマリーの設定には「サーバー管理」権限が必要です。");
+    const changes = z.object({
+      day: z.number().int().min(1).max(7).optional(), hour: z.number().int().min(0).max(23).optional(), enabled: z.boolean().optional(),
+    }).strict().parse(options);
+    const patch = {
+      ...(changes.day !== undefined && { weekly_day: changes.day }), ...(changes.hour !== undefined && { weekly_hour: changes.hour }),
+      ...(changes.enabled !== undefined && { weekly_enabled: changes.enabled }),
+    };
+    const changed = Object.keys(patch).length > 0;
+    const schedule = changed ? await deps.store.setWeeklySchedule(guildId, patch) : await deps.store.weeklySchedule(guildId);
+    return { message: weeklyScheduleMessage(schedule, changed) };
+  }
   if (command.name === "github") {
     const origin = deps.origin();
     const ticket = randomToken();

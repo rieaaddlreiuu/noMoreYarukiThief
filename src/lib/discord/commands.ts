@@ -5,6 +5,11 @@ export const nikiCommand = {
     { type: 1, name: "setup", description: "通知先を設定（サーバー管理権限が必要）", options: [
       { type: 7, name: "channel", description: "Botの通知先テキストチャンネル", required: true, channel_types: [0] },
     ] },
+    { type: 1, name: "weekly", description: "週次サマリーの投稿日時を設定する（サーバー管理権限が必要。省略時は現在の設定を表示）", options: [
+      { type: 4, name: "day", description: "投稿する曜日", choices: ["月", "火", "水", "木", "金", "土", "日"].map((name, index) => ({ name: `${name}曜日`, value: index + 1 })) },
+      { type: 4, name: "hour", description: "投稿する時（日本時間 0〜23）", min_value: 0, max_value: 23 },
+      { type: 5, name: "enabled", description: "falseで週次サマリーを停止、trueで再開" },
+    ] },
     { type: 1, name: "github", description: "自分のGitHubアカウントをこのサーバーで連携する" },
     { type: 1, name: "declare", description: "開発内容と期限を宣言する", options: [
       { type: 3, name: "content", description: "何を開発するか", required: true, min_length: 1, max_length: 500 },

@@ -12,7 +12,9 @@ function interaction(name: Interaction["data"]["options"][number]["name"], optio
 
 function dependencies() {
   const mocks = {
-    setup: vi.fn(), setNotifyChannel: vi.fn(), requireSetup: vi.fn(), requireMember: vi.fn(), issueOAuth: vi.fn(),
+    setup: vi.fn(), weeklySchedule: vi.fn().mockResolvedValue({ weekly_day: 1, weekly_hour: 9, weekly_enabled: true }),
+    setWeeklySchedule: vi.fn().mockImplementation(async (_guild, changes) => ({ weekly_day: 1, weekly_hour: 9, weekly_enabled: true, ...changes })),
+    setNotifyChannel: vi.fn(), requireSetup: vi.fn(), requireMember: vi.fn(), issueOAuth: vi.fn(),
     createDeclaration: vi.fn().mockResolvedValue(declaration()), cancelDeclaration: vi.fn().mockResolvedValue(declaration({ status: "cancelled" })),
     teamStatus: vi.fn().mockResolvedValue({ members: [], declarations: [], pendingNotifications: 0 }),
     assertChannel: vi.fn(), validateRepository: vi.fn().mockResolvedValue({ repository: "owner/repository", branch: "main" }),
@@ -33,6 +35,32 @@ describe("command scope and permissions", () => {
     await handleCommand(interaction("setup", { channel: channelId }, "32"), deps);
     expect(mocks.assertChannel).toHaveBeenCalledWith(guildId, channelId);
     expect(mocks.setup).toHaveBeenCalledWith(guildId, channelId);
+  });
+  it("denies weekly schedule changes without Manage Server", async () => {
+    const { mocks, deps } = dependencies();
+    await expect(handleCommand(interaction("weekly", { day: 5 }), deps)).rejects.toThrow("権限");
+    expect(mocks.setWeeklySchedule).not.toHaveBeenCalled();
+  });
+  it("updates only the given weekly options for the current guild", async () => {
+    const { mocks, deps } = dependencies();
+    const result = await handleCommand(interaction("weekly", { day: 5, hour: 18 }, "32"), deps);
+    expect(mocks.requireSetup).toHaveBeenCalledWith(guildId);
+    expect(mocks.setWeeklySchedule).toHaveBeenCalledWith(guildId, { weekly_day: 5, weekly_hour: 18 });
+    expect(result.message.content).toContain("毎週金曜日 18:00 JST");
+    await handleCommand(interaction("weekly", { enabled: false }, "32"), deps);
+    expect(mocks.setWeeklySchedule).toHaveBeenLastCalledWith(guildId, { weekly_enabled: false });
+  });
+  it("shows the current weekly schedule without changing it when no option is given", async () => {
+    const { mocks, deps } = dependencies();
+    const result = await handleCommand(interaction("weekly", {}, "8"), deps);
+    expect(mocks.setWeeklySchedule).not.toHaveBeenCalled();
+    expect(result.message.content).toContain("毎週月曜日 09:00 JST（有効）");
+  });
+  it("rejects out-of-range weekly options before writing", async () => {
+    const { mocks, deps } = dependencies();
+    await expect(handleCommand(interaction("weekly", { day: 8 }, "32"), deps)).rejects.toThrow();
+    await expect(handleCommand(interaction("weekly", { hour: 24 }, "32"), deps)).rejects.toThrow();
+    expect(mocks.setWeeklySchedule).not.toHaveBeenCalled();
   });
   it("adds the channel where the command ran as the caller's personal channel, and clears it with reset", async () => {
     const { mocks, deps } = dependencies();

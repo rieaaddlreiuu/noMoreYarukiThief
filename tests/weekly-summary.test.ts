@@ -1,14 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { previousWeek, weekFromStart, weeklyPayload, weeklyStats, weeklyText, type WeeklyMember, type WeeklySnapshot } from "../src/lib/weekly-summary";
+import { nextWeeklyDelivery, previousWeek, weeklyDueAt, weekFromStart, weeklyPayload, weeklyStats, weeklyText, type WeeklyMember, type WeeklySnapshot } from "../src/lib/weekly-summary";
 
 const member = (id: string, succeeded: number, failed: number): WeeklyMember => ({ discord_id: id, github_login: `user-${id}`, succeeded, failed });
 const snapshot = (members: WeeklyMember[], declaration_count = 1): WeeklySnapshot => ({ guild_id: "100000000000000001", channel_id: "300000000000000001", declaration_count, members });
 
 describe("JST weekly boundaries", () => {
-  it("covers Monday midnight through Sunday 23:59:59.999, with Monday 09:00 due time", () => {
+  it("covers Monday midnight through Sunday 23:59:59.999", () => {
     expect(previousWeek(new Date("2026-10-05T00:00:00Z"))).toEqual({
       weekStart: "2026-09-28", lastDay: "2026-10-04", start: "2026-09-27T15:00:00.000Z",
-      end: "2026-10-04T15:00:00.000Z", dueAt: "2026-10-05T00:00:00.000Z",
+      end: "2026-10-04T15:00:00.000Z",
     });
     expect(previousWeek(new Date("2026-10-04T14:59:59.999Z")).weekStart).toBe("2026-09-21");
     expect(previousWeek(new Date("2026-10-04T15:00:00Z")).weekStart).toBe("2026-09-28");
@@ -71,5 +71,21 @@ describe("weekly ranking and Niki text", () => {
     expect(message.content.length).toBeLessThanOrEqual(2000);
     expect(attachment).toContain(`<@${input.members.at(-1)!.discord_id}>`);
     expect(attachment).toContain("チーム全体: 達成 200");
+  });
+});
+
+describe("weekly delivery schedule", () => {
+  const week = weekFromStart("2026-09-28");
+  it("computes the due time from the weekday and hour in JST", () => {
+    expect(weeklyDueAt(week, 1, 9).toISOString()).toBe("2026-10-05T00:00:00.000Z");
+    expect(weeklyDueAt(week, 5, 18).toISOString()).toBe("2026-10-09T09:00:00.000Z");
+    expect(weeklyDueAt(week, 7, 23).toISOString()).toBe("2026-10-11T14:00:00.000Z");
+  });
+  it("finds the next delivery, including today's slot and the following week", () => {
+    const monday = { weekly_day: 1, weekly_hour: 9 };
+    expect(nextWeeklyDelivery(monday, new Date("2026-10-04T23:00:00Z")).toISOString()).toBe("2026-10-05T00:00:00.000Z");
+    expect(nextWeeklyDelivery(monday, new Date("2026-10-05T00:00:00Z")).toISOString()).toBe("2026-10-12T00:00:00.000Z");
+    expect(nextWeeklyDelivery({ weekly_day: 5, weekly_hour: 18 }, new Date("2026-10-05T01:00:00Z")).toISOString()).toBe("2026-10-09T09:00:00.000Z");
+    expect(nextWeeklyDelivery({ weekly_day: 7, weekly_hour: 23 }, new Date("2026-10-11T14:00:00Z")).toISOString()).toBe("2026-10-18T14:00:00.000Z");
   });
 });

@@ -2,7 +2,7 @@ import { discordText } from "./domain";
 
 const DAY = 86_400_000;
 const JST = 9 * 3_600_000;
-export type Week = { start: string; end: string; weekStart: string; lastDay: string; dueAt: string };
+export type Week = { start: string; end: string; weekStart: string; lastDay: string };
 
 export function weekFromStart(value: string): Week {
   const start = new Date(`${value}T00:00:00+09:00`);
@@ -10,8 +10,7 @@ export function weekFromStart(value: string): Week {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value) || !Number.isFinite(start.getTime()) ||
       local.toISOString().slice(0, 10) !== value || local.getUTCDay() !== 1) throw new Error("Week must start on a valid Monday");
   return { start: start.toISOString(), end: new Date(start.getTime() + 7 * DAY).toISOString(), weekStart: value,
-    lastDay: new Date(local.getTime() + 6 * DAY).toISOString().slice(0, 10),
-    dueAt: new Date(start.getTime() + 7 * DAY + JST).toISOString() };
+    lastDay: new Date(local.getTime() + 6 * DAY).toISOString().slice(0, 10) };
 }
 
 export function previousWeek(now = new Date()): Week {
@@ -19,6 +18,19 @@ export function previousWeek(now = new Date()): Week {
   local.setUTCHours(0, 0, 0, 0);
   local.setUTCDate(local.getUTCDate() - (local.getUTCDay() + 6) % 7 - 7);
   return weekFromStart(local.toISOString().slice(0, 10));
+}
+
+export type WeeklySchedule = { weekly_day: number; weekly_hour: number; weekly_enabled: boolean };
+export const WEEKDAY_NAMES = ["月", "火", "水", "木", "金", "土", "日"];
+
+// day: 1 = Monday ... 7 = Sunday (JST). Mirrors the delivery time check in niki_weekly_preview.
+export function weeklyDueAt(week: Week, day: number, hour: number): Date {
+  return new Date(Date.parse(week.end) + (day - 1) * DAY + hour * 3_600_000);
+}
+
+export function nextWeeklyDelivery(schedule: Pick<WeeklySchedule, "weekly_day" | "weekly_hour">, now = new Date()): Date {
+  const due = weeklyDueAt(previousWeek(now), schedule.weekly_day, schedule.weekly_hour);
+  return due.getTime() > now.getTime() ? due : weeklyDueAt(previousWeek(new Date(now.getTime() + 7 * DAY)), schedule.weekly_day, schedule.weekly_hour);
 }
 
 export type WeeklyMember = { discord_id: string; github_login: string; succeeded: number; failed: number };

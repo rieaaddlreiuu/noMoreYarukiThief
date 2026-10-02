@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
-import { afterAll, beforeAll, beforeEach, expect, it } from "vitest";
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import type { WeeklyReport, WeeklySnapshot } from "../src/lib/weekly-summary";
 
 let db: PGlite;
@@ -11,7 +11,7 @@ const claim = async () => (await query<WeeklyReport>("select * from public.niki_
 beforeAll(async () => {
   db = new PGlite();
   await db.exec("create role anon; create role authenticated; create role service_role bypassrls;");
-  for (const name of ["202609260001_mvp.sql", "202609300001_ai_judgement.sql", "202610010001_notify_channel.sql", "202610020001_notify_channel_mirror.sql", "202610030001_weekly_summary.sql", "202610040001_early_check.sql", "202610050001_github_token.sql"]) {
+  for (const name of ["202609260001_mvp.sql", "202609300001_ai_judgement.sql", "202610010001_notify_channel.sql", "202610020001_notify_channel_mirror.sql", "202610030001_weekly_summary.sql", "202610040001_early_check.sql", "202610050001_github_token.sql", "202610060001_weekly_schedule.sql"]) {
     await db.exec(readFileSync(new URL(`../supabase/migrations/${name}`, import.meta.url), "utf8"));
   }
 });
@@ -101,7 +101,7 @@ it("restricts data and functions to the backend role", async () => {
   expect(await query("select has_table_privilege('anon','public.weekly_reports','select') as ok")).toEqual([{ ok: false }]);
   expect(await query("select has_table_privilege('authenticated','public.weekly_reports','insert') as ok")).toEqual([{ ok: false }]);
   expect(await query("select relrowsecurity as ok from pg_class where oid='public.weekly_reports'::regclass")).toEqual([{ ok: true }]);
-  for (const fn of ["niki_weekly_preview(date,text,integer)", "niki_prepare_weekly(date)", "niki_claim_weekly()", "niki_finish_weekly(uuid,uuid,text)", "niki_retry_weekly(uuid,uuid,text,integer)"]) {
+  for (const fn of ["niki_weekly_preview(date,text,integer,boolean)", "niki_prepare_weekly(date)", "niki_claim_weekly()", "niki_finish_weekly(uuid,uuid,text)", "niki_retry_weekly(uuid,uuid,text,integer)"]) {
     expect(await query("select has_function_privilege('anon',$1,'execute') as ok", [`public.${fn}`])).toEqual([{ ok: false }]);
     expect(await query("select has_function_privilege('service_role',$1,'execute') as ok", [`public.${fn}`])).toEqual([{ ok: true }]);
   }
@@ -114,4 +114,52 @@ it("prepares more than 100 servers over repeated runs without starvation", async
   expect(await query("select public.niki_prepare_weekly('2020-01-06') as count")).toEqual([{ count: 7 }]);
   expect(await query("select public.niki_prepare_weekly('2020-01-06') as count")).toEqual([{ count: 0 }]);
   expect(await query("select * from public.weekly_reports")).toHaveLength(107);
+});
+
+describe("per-server delivery schedule", () => {
+  // Week 2026-09-28 ends 2026-10-05 00:00 JST; Friday 18:00 JST is 2026-10-09T09:00Z.
+  const setSchedule = (server: string, day: number, hour: number, enabled = true) =>
+    db.query("update public.guild_settings set weekly_day=$2, weekly_hour=$3, weekly_enabled=$4 where guild_id=$1", [server, day, hour, enabled]);
+
+  it("defaults to Monday 09:00 JST, enabled", async () => {
+    expect(await query("select weekly_day, weekly_hour, weekly_enabled from public.guild_settings where guild_id=$1", [guild]))
+      .toEqual([{ weekly_day: 1, weekly_hour: 9, weekly_enabled: true }]);
+  });
+
+  it("prepares only servers whose own delivery time has passed", async () => {
+    await setSchedule(other, 7, 23);
+    // Past weeks are always due for the Monday 09:00 default; the Sunday 23:00 server is due 6 days 14 hours later.
+    const recent = "(date_trunc('week', now() at time zone 'Asia/Tokyo') - interval '7 days')::date";
+    const [{ week }] = await query<{ week: string }>(`select to_char(${recent}, 'YYYY-MM-DD') as week`);
+    const rows = await query<{ guild_id: string }>("select guild_id from public.niki_weekly_preview($1::date,'',100,true)", [week]);
+    const due = (day: number, hour: number) => Date.parse(`${week}T00:00:00+09:00`) + 7 * 86_400_000 + (day - 1) * 86_400_000 + hour * 3_600_000 <= Date.now();
+    expect(rows.some((row) => row.guild_id === guild)).toBe(due(1, 9));
+    expect(rows.some((row) => row.guild_id === other)).toBe(due(7, 23));
+  });
+
+  it("does not prepare disabled servers or claim their pending reports until re-enabled", async () => {
+    await setSchedule(other, 1, 9, false);
+    expect(await query("select public.niki_prepare_weekly('2020-01-06') as count")).toEqual([{ count: 1 }]);
+    expect(await query("select guild_id from public.weekly_reports")).toEqual([{ guild_id: guild }]);
+    await setSchedule(guild, 1, 9, false);
+    expect(await claim()).toBeNull();
+    await setSchedule(guild, 1, 9, true);
+    expect((await claim())?.guild_id).toBe(guild);
+  });
+
+  it("does not post again when the schedule changes after the week was prepared", async () => {
+    await db.query("select public.niki_prepare_weekly('2020-01-06')");
+    await setSchedule(guild, 5, 18);
+    expect(await query("select public.niki_prepare_weekly('2020-01-06') as count")).toEqual([{ count: 0 }]);
+    expect(await query("select * from public.weekly_reports")).toHaveLength(2);
+  });
+
+  it("refuses to prepare a week that has not ended yet", async () => {
+    await expect(db.query("select public.niki_prepare_weekly('2999-01-07')")).rejects.toThrow();
+  });
+
+  it("rejects out-of-range settings", async () => {
+    await expect(setSchedule(guild, 8, 9)).rejects.toThrow();
+    await expect(setSchedule(guild, 1, 24)).rejects.toThrow();
+  });
 });

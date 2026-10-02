@@ -1,4 +1,5 @@
 import { discordText, formatJst, statistics, type Declaration, type Member, type Notification } from "../domain";
+import { nextWeeklyDelivery, WEEKDAY_NAMES, type WeeklySchedule } from "../weekly-summary";
 
 export type Message = {
   content?: string;
@@ -102,4 +103,15 @@ export function statusMessage(members: Member[], declarations: Declaration[], pa
         footer: { text: "達成率は判定済みのみ。連続日数は期限の日本時間の日付で集計。" } },
     ],
   };
+}
+
+export function weeklyScheduleMessage(schedule: WeeklySchedule, changed: boolean, now = new Date()): Message {
+  const when = `毎週${WEEKDAY_NAMES[schedule.weekly_day - 1]}曜日 ${String(schedule.weekly_hour).padStart(2, "0")}:00 JST`;
+  const lines = [
+    changed ? "週次サマリーの設定を更新しました。" : "週次サマリーの現在の設定です。",
+    schedule.weekly_enabled ? `投稿: ${when}（有効）` : `投稿: 停止中（設定は ${when}）`,
+  ];
+  if (schedule.weekly_enabled) lines.push(`次回: ${formatJst(nextWeeklyDelivery(schedule, now))}（最大5分遅れることがあります）`);
+  if (changed) lines.push("集計期間は先週の月〜日のままです。今週分が投稿済みなら、新しい設定は来週から使われます。");
+  return { content: lines.join("\n") };
 }

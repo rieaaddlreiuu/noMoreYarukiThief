@@ -1,6 +1,7 @@
 import "server-only";
 import { createClient } from "@supabase/supabase-js";
 import { env } from "./config";
+import type { WeeklySchedule } from "./weekly-summary";
 import { UserError, type Declaration, type Member, type Notification } from "./domain";
 
 type DbResult = { data: unknown; error: { code?: string; message: string } | null };
@@ -50,6 +51,16 @@ export function createStore() {
     },
     async requireSetup(guildId: string) {
       const row = await query<{ channel_id: string } | null>(db.from("guild_settings").select("channel_id").eq("guild_id", guildId).maybeSingle());
+      if (!row) throw new UserError("管理者が先に /niki setup で通知先を設定してください。");
+      return row;
+    },
+    async weeklySchedule(guildId: string) {
+      const row = await query<WeeklySchedule | null>(db.from("guild_settings").select("weekly_day, weekly_hour, weekly_enabled").eq("guild_id", guildId).maybeSingle());
+      if (!row) throw new UserError("管理者が先に /niki setup で通知先を設定してください。");
+      return row;
+    },
+    async setWeeklySchedule(guildId: string, changes: Partial<WeeklySchedule>) {
+      const row = await query<WeeklySchedule | null>(db.from("guild_settings").update(changes).eq("guild_id", guildId).select("weekly_day, weekly_hour, weekly_enabled").maybeSingle());
       if (!row) throw new UserError("管理者が先に /niki setup で通知先を設定してください。");
       return row;
     },

@@ -9,10 +9,9 @@ export async function runWeeklyJobs(deps: {
   const until = Date.now() + budgetMs;
   const week = previousWeek(now);
   const counts = { prepared: 0, sent: 0, retry: 0, stale: 0 };
-  // No posting of the just-ended week before Monday 09:00 JST. Older retries can still drain.
-  const due = now.getTime() >= Date.parse(week.dueAt);
-  console.log("[weekly] run", { weekStart: week.weekStart, dueAt: week.dueAt, due });
-  if (due) counts.prepared = await deps.store.prepare(week.weekStart);
+  console.log("[weekly] run", { weekStart: week.weekStart });
+  // Each server's delivery day/hour is checked by the database; only servers that are due get a report.
+  counts.prepared = await deps.store.prepare(week.weekStart);
   for (let i = 0; i < 10 && Date.now() < until - 10_000; i++) {
     const row = await deps.store.claim();
     if (!row) break;
